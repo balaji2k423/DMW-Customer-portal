@@ -21,11 +21,9 @@ from .serializers import (
 
 
 def get_user_project_ids(user):
-    if user.role == 'project_manager':
+    if user.role in ('project_manager', 'admin'):  # ← added 'admin'
         return None
-    return ProjectMember.objects.filter(
-        user=user
-    ).values_list('project_id', flat=True)
+    return ProjectMember.objects.filter(user=user).values_list('project_id', flat=True)
 
 
 def get_ticket_queryset(user):

@@ -2,8 +2,9 @@ from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, Permis
 from django.db import models
 
 class UserRole(models.TextChoices):
-    CUSTOMER_ADMIN = 'customer_admin', 'Customer Admin'
-    CUSTOMER_USER  = 'customer_user',  'Customer User'
+    ADMIN           = 'admin',           'Admin'
+    CUSTOMER_ADMIN  = 'customer_admin',  'Customer Admin'
+    CUSTOMER_USER   = 'customer_user',   'Customer User'
     PROJECT_MANAGER = 'project_manager', 'Project Manager'
 
 class CustomUserManager(BaseUserManager):
@@ -19,7 +20,7 @@ class CustomUserManager(BaseUserManager):
     def create_superuser(self, email, password=None, **extra_fields):
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
-        extra_fields.setdefault('role', UserRole.PROJECT_MANAGER)
+        extra_fields.setdefault('role', UserRole.ADMIN)
         return self.create_user(email, password, **extra_fields)
 
 class CustomUser(AbstractBaseUser, PermissionsMixin):

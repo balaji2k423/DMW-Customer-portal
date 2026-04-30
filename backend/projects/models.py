@@ -29,11 +29,17 @@ class Project(models.Model):
         COMPLETED   = 'completed',   'Completed'
         CANCELLED   = 'cancelled',   'Cancelled'
 
-    customer        = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='projects')
+    customer        = models.ForeignKey(
+                        settings.AUTH_USER_MODEL,          # ← changed from Customer
+                        on_delete=models.SET_NULL,
+                        null=True, blank=True,
+                        related_name='owned_projects',
+                        limit_choices_to={'role__in': ['customer_admin', 'customer_user']},
+                      )
     name            = models.CharField(max_length=200)
     description     = models.TextField(blank=True)
     status          = models.CharField(max_length=20, choices=Status.choices, default=Status.PLANNING)
-    progress        = models.PositiveIntegerField(default=0, help_text='Overall progress percentage 0-100')
+    progress        = models.PositiveIntegerField(default=0)
     robot_model     = models.CharField(max_length=100, blank=True)
     robot_serial    = models.CharField(max_length=100, blank=True)
     contract_number = models.CharField(max_length=100, blank=True)
@@ -44,7 +50,7 @@ class Project(models.Model):
     updated_at      = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"{self.name} — {self.customer.name}"
+        return f"{self.name} — {self.customer.full_name if self.customer else 'No Customer'}"
 
     class Meta:
         ordering = ['-created_at']

@@ -17,10 +17,6 @@ from .permissions import IsProjectMember, IsProjectManagerOrReadOnly
 
 
 class DashboardView(APIView):
-    """
-    Returns all projects the logged-in user is a member of,
-    with summary data for the dashboard hero screen.
-    """
     permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
@@ -64,10 +60,8 @@ class ProjectListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        # Project managers see all projects
-        if user.role == 'project_manager':
+        if user.role in ('project_manager', 'admin'):
             return Project.objects.all().select_related('customer')
-        # Customers see only their assigned projects
         project_ids = ProjectMember.objects.filter(
             user=user
         ).values_list('project_id', flat=True)
@@ -86,7 +80,7 @@ class ProjectDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role == 'project_manager':
+        if user.role in ('project_manager', 'admin'):
             return Project.objects.all().select_related('customer')
         project_ids = ProjectMember.objects.filter(
             user=user

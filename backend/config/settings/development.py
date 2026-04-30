@@ -8,3 +8,7 @@ EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 
 # ✅ Allow both localhost variants during development
 CORS_ALLOW_ALL_ORIGINS = True
+
+# ✅ Disable throttling in development
+REST_FRAMEWORK['DEFAULT_THROTTLE_CLASSES'] = []
+REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {}

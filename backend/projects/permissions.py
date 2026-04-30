@@ -19,9 +19,9 @@ class IsCustomerAdmin(BasePermission):
 
 
 class IsProjectManagerOrReadOnly(BasePermission):
-    """Project managers can write. Others get read-only."""
+    """Project managers and admins can write. Others get read-only."""
 
     def has_permission(self, request, view):
         if request.method in ('GET', 'HEAD', 'OPTIONS'):
             return True
-        return request.user.role == 'project_manager'
+        return request.user.role in ('project_manager', 'admin')
