@@ -13,11 +13,37 @@ from .serializers import (
     DeliverableSerializer,
     SignOffSerializer,
 )
-from .permissions import CanSignOff, IsProjectManagerOrReadOnly
+from .permissions import CanSignOff, IsProjectManagerOrReadOnly, IsAdminOrReadOnly
+
+
+def get_accessible_project_ids(user):
+    """
+    Return a set of project IDs the user can access, or None for full access.
+
+    - admin / project_manager  → None  (no filter, see everything)
+    - customer_admin / customer_user →
+          projects where user == project.customer  (FK on Project)
+          UNION
+          projects where user is in ProjectMember
+    """
+    from projects.models import ProjectMember, Project
+
+    if user.role in ('admin', 'project_manager'):
+        return None  # full access — caller skips the filter
+
+    # Force evaluation with list() so we get plain ints, not lazy querysets
+    customer_project_ids = list(
+        Project.objects.filter(customer=user).values_list('id', flat=True)
+    )
+    member_project_ids = list(
+        ProjectMember.objects.filter(user=user).values_list('project_id', flat=True)
+    )
+
+    return set(customer_project_ids) | set(member_project_ids)
 
 
 class MilestoneListCreateView(generics.ListCreateAPIView):
-    permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
+    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
     throttle_classes   = [BurstRateThrottle, SustainedRateThrottle, IPRateThrottle]
     filter_backends    = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
     filterset_fields   = ['status', 'project']
@@ -25,13 +51,17 @@ class MilestoneListCreateView(generics.ListCreateAPIView):
     ordering_fields    = ['planned_date', 'order', 'created_at']
 
     def get_queryset(self):
-        user = self.request.user
-        if user.role == 'project_manager':
+        user        = self.request.user
+        project_ids = get_accessible_project_ids(user)
+
+        if project_ids is None:
+            # admin / project_manager — see all
             return Milestone.objects.all().select_related('owner', 'project')
-        from projects.models import ProjectMember
-        project_ids = ProjectMember.objects.filter(
-            user=user
-        ).values_list('project_id', flat=True)
+
+        if not project_ids:
+            # Customer has no accessible projects
+            return Milestone.objects.none()
+
         return Milestone.objects.filter(
             project_id__in=project_ids
         ).select_related('owner', 'project')
@@ -43,17 +73,19 @@ class MilestoneListCreateView(generics.ListCreateAPIView):
 
 
 class MilestoneDetailView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
+    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get_queryset(self):
-        user = self.request.user
-        if user.role == 'project_manager':
+        user        = self.request.user
+        project_ids = get_accessible_project_ids(user)
+
+        if project_ids is None:
             return Milestone.objects.all().select_related('owner', 'project')
-        from projects.models import ProjectMember
-        project_ids = ProjectMember.objects.filter(
-            user=user
-        ).values_list('project_id', flat=True)
+
+        if not project_ids:
+            return Milestone.objects.none()
+
         return Milestone.objects.filter(
             project_id__in=project_ids
         ).select_related('owner', 'project')
@@ -66,7 +98,7 @@ class MilestoneDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 class MilestoneSignOffView(APIView):
     """
-    POST — Customer admin signs off a milestone.
+    POST   — Customer admin signs off a milestone.
     DELETE — Remove an existing sign-off (project manager only).
     """
     permission_classes = [IsAuthenticated]
@@ -98,7 +130,6 @@ class MilestoneSignOffView(APIView):
             signed_by=request.user,
             remarks=request.data.get('remarks', '')
         )
-        # Auto-complete the milestone on sign-off
         milestone.status = Milestone.Status.COMPLETED
         milestone.save()
 
@@ -124,7 +155,7 @@ class MilestoneSignOffView(APIView):
 
 class DeliverableListCreateView(generics.ListCreateAPIView):
     serializer_class   = DeliverableSerializer
-    permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
+    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
     filter_backends    = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields   = ['status', 'milestone']
@@ -142,7 +173,7 @@ class DeliverableListCreateView(generics.ListCreateAPIView):
 
 class DeliverableDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class   = DeliverableSerializer
-    permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
+    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get_queryset(self):
@@ -153,26 +184,24 @@ class DeliverableDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 class ProjectMilestoneTimelineView(APIView):
     """
-    Returns all milestones for a specific project
-    ordered for timeline/stepper display.
+    Returns all milestones for a specific project ordered for timeline/stepper display.
+    Access:
+      - admin / project_manager → all projects
+      - customer_admin / customer_user → only their accessible projects
     """
     permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get(self, request, project_pk):
-        from projects.models import ProjectMember, Project
+        user        = request.user
+        project_ids = get_accessible_project_ids(user)
 
-        # Check access
-        if request.user.role != 'project_manager':
-            is_member = ProjectMember.objects.filter(
-                user=request.user,
-                project_id=project_pk
-            ).exists()
-            if not is_member:
-                return Response(
-                    {'error': 'You do not have access to this project.'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+        # None means full access; otherwise verify this project is in the allowed set
+        if project_ids is not None and int(project_pk) not in project_ids:
+            return Response(
+                {'error': 'You do not have access to this project.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         milestones = Milestone.objects.filter(
             project_id=project_pk
@@ -180,7 +209,6 @@ class ProjectMilestoneTimelineView(APIView):
 
         serializer = MilestoneDetailSerializer(milestones, many=True)
 
-        # Summary stats
         total     = milestones.count()
         completed = milestones.filter(status='completed').count()
         delayed   = sum(1 for m in milestones if m.is_delayed)

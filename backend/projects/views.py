@@ -3,11 +3,14 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
+from django.contrib.auth import get_user_model
 from api.throttling import BurstRateThrottle, SustainedRateThrottle, IPRateThrottle
 
 from .models import Customer, Project, ProjectMember
 from .serializers import (
     CustomerSerializer,
+    CustomerDropdownSerializer,
+    UserDropdownSerializer,
     ProjectListSerializer,
     ProjectDetailSerializer,
     ProjectMemberSerializer,
@@ -15,23 +18,64 @@ from .serializers import (
 )
 from .permissions import IsProjectMember, IsProjectManagerOrReadOnly
 
+User = get_user_model()
+
+
+# ─── Dashboard ────────────────────────────────────────────────────────────────
 
 class DashboardView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get(self, request):
-        project_ids = ProjectMember.objects.filter(
-            user=request.user
-        ).values_list('project_id', flat=True)
+        user = request.user
+        if user.role in ('project_manager', 'admin'):
+            projects = Project.objects.all().select_related('customer')
+        else:
+            project_ids = ProjectMember.objects.filter(
+                user=user
+            ).values_list('project_id', flat=True)
+            projects = Project.objects.filter(
+                id__in=project_ids
+            ).select_related('customer')
 
-        projects = Project.objects.filter(id__in=project_ids).select_related('customer')
         serializer = DashboardSerializer(projects, many=True, context={'request': request})
-        return Response({
-            'count':    len(serializer.data),
-            'projects': serializer.data,
-        })
+        return Response({'count': len(serializer.data), 'projects': serializer.data})
 
+
+# ─── Dropdown helpers (used by the frontend create-project form) ───────────────
+
+class CustomerDropdownView(generics.ListAPIView):
+    """
+    GET /projects/customers/dropdown/
+    Returns CustomUser records with customer_admin or customer_user role.
+    Shape: [{ id, name }] where name = company (if set) else full_name.
+    The frontend sends user.id as Project.customer FK.
+    """
+    serializer_class   = CustomerDropdownSerializer
+    permission_classes = [IsAuthenticated]
+    throttle_classes   = [BurstRateThrottle]
+    pagination_class   = None
+
+    def get_queryset(self):
+        return User.objects.filter(
+            role__in=['customer_admin', 'customer_user'],
+            is_active=True,
+        ).order_by('company', 'first_name', 'last_name')
+
+
+class UserDropdownView(generics.ListAPIView):
+    """GET /projects/users/dropdown/ — returns all users for member assignment."""
+    serializer_class   = UserDropdownSerializer
+    permission_classes = [IsAuthenticated]
+    throttle_classes   = [BurstRateThrottle]
+    pagination_class   = None
+
+    def get_queryset(self):
+        return User.objects.filter(is_active=True).order_by('first_name', 'last_name')
+
+
+# ─── Customers (legacy — kept for other parts of the system) ──────────────────
 
 class CustomerListCreateView(generics.ListCreateAPIView):
     queryset           = Customer.objects.all()
@@ -50,6 +94,8 @@ class CustomerDetailView(generics.RetrieveUpdateDestroyAPIView):
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
 
+# ─── Projects ─────────────────────────────────────────────────────────────────
+
 class ProjectListCreateView(generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
     throttle_classes   = [BurstRateThrottle, SustainedRateThrottle, IPRateThrottle]
@@ -61,13 +107,13 @@ class ProjectListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         user = self.request.user
         if user.role in ('project_manager', 'admin'):
-            return Project.objects.all().select_related('customer')
+            return Project.objects.all().select_related('customer').prefetch_related('members')
         project_ids = ProjectMember.objects.filter(
             user=user
         ).values_list('project_id', flat=True)
         return Project.objects.filter(
             id__in=project_ids
-        ).select_related('customer')
+        ).select_related('customer').prefetch_related('members')
 
     def get_serializer_class(self):
         return ProjectDetailSerializer if self.request.method == 'POST' else ProjectListSerializer
@@ -81,12 +127,14 @@ class ProjectDetailView(generics.RetrieveUpdateDestroyAPIView):
     def get_queryset(self):
         user = self.request.user
         if user.role in ('project_manager', 'admin'):
-            return Project.objects.all().select_related('customer')
+            return Project.objects.all().select_related('customer').prefetch_related('members')
         project_ids = ProjectMember.objects.filter(
             user=user
         ).values_list('project_id', flat=True)
         return Project.objects.filter(id__in=project_ids)
 
+
+# ─── Project Members ──────────────────────────────────────────────────────────
 
 class ProjectMemberListView(generics.ListCreateAPIView):
     serializer_class   = ProjectMemberSerializer

@@ -16,3 +16,12 @@ class IsProjectManagerOrReadOnly(BasePermission):
         if request.method in ('GET', 'HEAD', 'OPTIONS'):
             return True
         return request.user.role == 'project_manager'
+
+class IsAdminOrReadOnly(BasePermission):
+    """Only admins can create, update, or delete. Everyone else is read-only."""
+    message = 'Only admins can create or modify milestones.'
+
+    def has_permission(self, request, view):
+        if request.method in ('GET', 'HEAD', 'OPTIONS'):
+            return True
+        return request.user.is_authenticated and request.user.role == 'admin'

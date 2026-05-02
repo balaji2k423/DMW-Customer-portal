@@ -8,6 +8,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from .models import CustomUser, UserRole
 from .serializers import (
+    AdminCreateUserSerializer,
+    AdminUpdateUserSerializer,
     CustomTokenObtainPairSerializer,
     UserSerializer,
     RegisterSerializer,
@@ -97,14 +99,28 @@ class AdminUserListView(generics.ListAPIView):
 
 
 class AdminUserDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    GET    /admin/users/<pk>/  → retrieve (UserSerializer)
+    PATCH  /admin/users/<pk>/  → partial update incl. optional password (AdminUpdateUserSerializer)
+    PUT    /admin/users/<pk>/  → full update incl. optional password (AdminUpdateUserSerializer)
+    DELETE /admin/users/<pk>/  → delete
+    """
     queryset = CustomUser.objects.all()
-    serializer_class = UserSerializer
     permission_classes = [IsAuthenticated, IsAdmin]
+
+    def get_serializer_class(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            return AdminUpdateUserSerializer
+        return UserSerializer
 
 
 class AdminCreateUserView(generics.CreateAPIView):
+    """
+    POST /admin/users/create/
+    password is optional — a random one is auto-generated when omitted.
+    """
     queryset = CustomUser.objects.all()
-    serializer_class = RegisterSerializer
+    serializer_class = AdminCreateUserSerializer
     permission_classes = [IsAuthenticated, IsAdmin]
 
 

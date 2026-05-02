@@ -71,6 +71,13 @@ class MilestoneCreateUpdateSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, data):
+        # FIX: surface a clear error when `project` is missing instead of
+        # letting the DB constraint bubble up as a cryptic 400.
+        if not self.instance and not data.get('project'):
+            raise serializers.ValidationError(
+                {'project': 'A project is required to create a milestone.'}
+            )
+
         planned = data.get('planned_date', getattr(self.instance, 'planned_date', None))
         actual  = data.get('actual_date',  getattr(self.instance, 'actual_date',  None))
         if actual and planned and actual < planned:

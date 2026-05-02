@@ -3,6 +3,10 @@ from django.conf import settings
 
 
 class Customer(models.Model):
+    """
+    Kept for backwards compatibility / other parts of the system.
+    No longer used as the FK target for Project.customer.
+    """
     name        = models.CharField(max_length=200)
     industry    = models.CharField(max_length=100, blank=True)
     address     = models.TextField(blank=True)
@@ -29,11 +33,12 @@ class Project(models.Model):
         COMPLETED   = 'completed',   'Completed'
         CANCELLED   = 'cancelled',   'Cancelled'
 
+    # FK to CustomUser (customer_admin / customer_user role)
     customer        = models.ForeignKey(
-                        settings.AUTH_USER_MODEL,          # ← changed from Customer
+                        settings.AUTH_USER_MODEL,
                         on_delete=models.SET_NULL,
                         null=True, blank=True,
-                        related_name='owned_projects',
+                        related_name='projects',
                         limit_choices_to={'role__in': ['customer_admin', 'customer_user']},
                       )
     name            = models.CharField(max_length=200)
@@ -54,19 +59,29 @@ class Project(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['customer', 'name'],
+                name='unique_project_name_per_customer',
+            )
+        ]
 
 
 class ProjectMember(models.Model):
 
     class MemberRole(models.TextChoices):
-        CUSTOMER_ADMIN   = 'customer_admin',   'Customer Admin'
-        CUSTOMER_USER    = 'customer_user',    'Customer User'
-        PROJECT_MANAGER  = 'project_manager',  'Project Manager'
+        CUSTOMER_ADMIN  = 'customer_admin',  'Customer Admin'
+        CUSTOMER_USER   = 'customer_user',   'Customer User'
+        PROJECT_MANAGER = 'project_manager', 'Project Manager'
 
-    project    = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='members')
-    user       = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='project_memberships')
-    role       = models.CharField(max_length=20, choices=MemberRole.choices, default=MemberRole.CUSTOMER_USER)
-    joined_at  = models.DateTimeField(auto_now_add=True)
+    project   = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='members')
+    user      = models.ForeignKey(
+                    settings.AUTH_USER_MODEL,
+                    on_delete=models.CASCADE,
+                    related_name='project_memberships',
+                )
+    role      = models.CharField(max_length=20, choices=MemberRole.choices, default=MemberRole.CUSTOMER_USER)
+    joined_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         unique_together = ('project', 'user')

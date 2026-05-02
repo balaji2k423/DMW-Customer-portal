@@ -37,7 +37,7 @@ INSTALLED_APPS = [
     'documents',
     'tickets',
     'notifications',
-    'groups',
+    
 ]
 
 MIDDLEWARE = [
