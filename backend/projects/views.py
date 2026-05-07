@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from api.throttling import BurstRateThrottle, SustainedRateThrottle, IPRateThrottle
 
 from .models import Customer, Project, ProjectMember
@@ -21,6 +22,24 @@ from .permissions import IsProjectMember, IsProjectManagerOrReadOnly
 User = get_user_model()
 
 
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def get_customer_projects(user):
+    """
+    Returns projects visible to a customer:
+      - projects where they are the customer FK (owner), OR
+      - projects where they are a ProjectMember
+    Uses .distinct() to avoid duplicates when both conditions are true.
+    """
+    member_project_ids = ProjectMember.objects.filter(
+        user=user
+    ).values_list('project_id', flat=True)
+
+    return Project.objects.filter(
+        Q(customer=user) | Q(id__in=member_project_ids)
+    ).select_related('customer').prefetch_related('members').distinct()
+
+
 # ─── Dashboard ────────────────────────────────────────────────────────────────
 
 class DashboardView(APIView):
@@ -32,12 +51,7 @@ class DashboardView(APIView):
         if user.role in ('project_manager', 'admin'):
             projects = Project.objects.all().select_related('customer')
         else:
-            project_ids = ProjectMember.objects.filter(
-                user=user
-            ).values_list('project_id', flat=True)
-            projects = Project.objects.filter(
-                id__in=project_ids
-            ).select_related('customer')
+            projects = get_customer_projects(user)
 
         serializer = DashboardSerializer(projects, many=True, context={'request': request})
         return Response({'count': len(serializer.data), 'projects': serializer.data})
@@ -108,12 +122,8 @@ class ProjectListCreateView(generics.ListCreateAPIView):
         user = self.request.user
         if user.role in ('project_manager', 'admin'):
             return Project.objects.all().select_related('customer').prefetch_related('members')
-        project_ids = ProjectMember.objects.filter(
-            user=user
-        ).values_list('project_id', flat=True)
-        return Project.objects.filter(
-            id__in=project_ids
-        ).select_related('customer').prefetch_related('members')
+        # Customers see projects where they are the owner FK OR a member
+        return get_customer_projects(user)
 
     def get_serializer_class(self):
         return ProjectDetailSerializer if self.request.method == 'POST' else ProjectListSerializer
@@ -128,10 +138,8 @@ class ProjectDetailView(generics.RetrieveUpdateDestroyAPIView):
         user = self.request.user
         if user.role in ('project_manager', 'admin'):
             return Project.objects.all().select_related('customer').prefetch_related('members')
-        project_ids = ProjectMember.objects.filter(
-            user=user
-        ).values_list('project_id', flat=True)
-        return Project.objects.filter(id__in=project_ids)
+        # Customers see projects where they are the owner FK OR a member
+        return get_customer_projects(user)
 
 
 # ─── Project Members ──────────────────────────────────────────────────────────

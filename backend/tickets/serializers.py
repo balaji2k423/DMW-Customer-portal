@@ -105,6 +105,8 @@ class TicketDetailSerializer(serializers.ModelSerializer):
 
 
 class TicketCreateSerializer(serializers.ModelSerializer):
+    description = serializers.CharField(required=False, allow_blank=True, default="")
+
     class Meta:
         model  = Ticket
         fields = [

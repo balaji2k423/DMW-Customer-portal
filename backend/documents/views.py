@@ -8,7 +8,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from django_filters.rest_framework import DjangoFilterBackend
 
 from api.throttling import BurstRateThrottle, SustainedRateThrottle, IPRateThrottle
-from projects.models import ProjectMember
+from projects.models import ProjectMember, Project
 from .models import Document, DocumentVersion
 from .serializers import (
     DocumentListSerializer,
@@ -18,13 +18,55 @@ from .serializers import (
     DocumentVersionUploadSerializer,
 )
 
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB — enforced at view level for all uploads
 
-def get_user_project_ids(user):
+
+def get_user_accessible_project_ids(user):
+    """
+    Returns:
+      - None  → user is admin (all projects)
+      - list  → project IDs the user can see
+
+    Scoping rules:
+      • admin           → all projects (None)
+      • project_manager → only projects they are a member of
+      • customer_*      → projects where they are the customer FK or a ProjectMember
+    """
+    if user.role == 'admin':
+        return None  # unrestricted
+
     if user.role == 'project_manager':
-        return None  # None means all projects
-    return ProjectMember.objects.filter(
-        user=user
-    ).values_list('project_id', flat=True)
+        return list(
+            ProjectMember.objects.filter(user=user).values_list('project_id', flat=True)
+        )
+
+    # customer_admin / customer_user
+    from django.db.models import Q
+    return list(
+        Project.objects.filter(
+            Q(customer=user) | Q(members__user=user)
+        ).distinct().values_list('id', flat=True)
+    )
+
+
+def _doc_queryset(user):
+    """Shared filtered queryset for documents."""
+    project_ids = get_user_accessible_project_ids(user)
+    qs = Document.objects.select_related('project', 'uploaded_by')
+    if project_ids is None:
+        return qs.all()
+    return qs.filter(project_id__in=project_ids)
+
+
+def _check_upload_size(request):
+    """Returns an error Response if the uploaded file exceeds 5 MB, else None."""
+    f = request.FILES.get('file')
+    if f and f.size > MAX_UPLOAD_BYTES:
+        return Response(
+            {'error': f'File size {f.size / 1024 / 1024:.1f} MB exceeds the 5 MB limit.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return None
 
 
 class DocumentListCreateView(generics.ListCreateAPIView):
@@ -37,17 +79,36 @@ class DocumentListCreateView(generics.ListCreateAPIView):
     ordering_fields    = ['created_at', 'title', 'category', 'file_size']
 
     def get_queryset(self):
-        project_ids = get_user_project_ids(self.request.user)
-        if project_ids is None:
-            return Document.objects.all().select_related('project', 'uploaded_by')
-        return Document.objects.filter(
-            project_id__in=project_ids
-        ).select_related('project', 'uploaded_by')
+        return _doc_queryset(self.request.user)
 
     def get_serializer_class(self):
-        if self.request.method == 'POST':
-            return DocumentUploadSerializer
-        return DocumentListSerializer
+        return DocumentUploadSerializer if self.request.method == 'POST' else DocumentListSerializer
+
+    def create(self, request, *args, **kwargs):
+        # Only admin and project_manager can upload
+        if request.user.role not in ('admin', 'project_manager'):
+            return Response(
+                {'error': 'Only admins and project managers can upload documents.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # 5 MB guard
+        size_err = _check_upload_size(request)
+        if size_err:
+            return size_err
+
+        # Project managers can only upload to their own assigned projects
+        if request.user.role == 'project_manager':
+            project_id = request.data.get('project')
+            if project_id:
+                allowed = get_user_accessible_project_ids(request.user)
+                if allowed is not None and int(project_id) not in allowed:
+                    return Response(
+                        {'error': 'You can only upload documents to projects you are assigned to.'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
+        return super().create(request, *args, **kwargs)
 
     def perform_create(self, serializer):
         serializer.save(uploaded_by=self.request.user)
@@ -59,59 +120,64 @@ class DocumentDetailView(generics.RetrieveUpdateDestroyAPIView):
     parser_classes     = [MultiPartParser, FormParser]
 
     def get_queryset(self):
-        project_ids = get_user_project_ids(self.request.user)
-        if project_ids is None:
-            return Document.objects.all().select_related('project', 'uploaded_by')
-        return Document.objects.filter(
-            project_id__in=project_ids
-        ).select_related('project', 'uploaded_by')
+        return _doc_queryset(self.request.user)
 
     def get_serializer_class(self):
-        if self.request.method in ('PUT', 'PATCH'):
-            return DocumentUploadSerializer
-        return DocumentDetailSerializer
+        return DocumentUploadSerializer if self.request.method in ('PUT', 'PATCH') else DocumentDetailSerializer
+
+    def update(self, request, *args, **kwargs):
+        if request.user.role not in ('admin', 'project_manager'):
+            return Response(
+                {'error': 'Only admins and project managers can edit documents.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        size_err = _check_upload_size(request)
+        if size_err:
+            return size_err
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if request.user.role not in ('admin', 'project_manager'):
+            return Response(
+                {'error': 'Only admins and project managers can delete documents.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().destroy(request, *args, **kwargs)
 
 
 class DocumentDownloadView(APIView):
-    """
-    Serves the file as a download and increments the download counter.
-    """
+    """Serves the file as a download and increments the download counter."""
     permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get(self, request, pk):
-        project_ids = get_user_project_ids(request.user)
-
         try:
-            if project_ids is None:
-                doc = Document.objects.get(pk=pk)
-            else:
-                doc = Document.objects.get(pk=pk, project_id__in=project_ids)
+            doc = _doc_queryset(request.user).get(pk=pk)
         except Document.DoesNotExist:
             raise Http404
 
         if not doc.file:
-            return Response(
-                {'error': 'No file attached to this document.'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'error': 'No file attached.'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Increment download count
         Document.objects.filter(pk=pk).update(download_count=doc.download_count + 1)
 
         file_handle = doc.file.open()
         filename    = os.path.basename(doc.file.name)
-        response    = FileResponse(file_handle, as_attachment=True, filename=filename)
-        return response
+        return FileResponse(file_handle, as_attachment=True, filename=filename)
 
 
 class DocumentVersionListView(generics.ListAPIView):
-    """List all versions of a specific document."""
+    """List all archived versions of a document."""
     serializer_class   = DocumentVersionSerializer
     permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get_queryset(self):
+        # Ensure the caller can actually see this document
+        try:
+            _doc_queryset(self.request.user).get(pk=self.kwargs['document_pk'])
+        except Document.DoesNotExist:
+            raise Http404
         return DocumentVersion.objects.filter(
             document_id=self.kwargs['document_pk']
         ).select_related('uploaded_by')
@@ -119,22 +185,32 @@ class DocumentVersionListView(generics.ListAPIView):
 
 class DocumentVersionUploadView(APIView):
     """
-    Upload a new version of a document.
-    Archives the current file as a DocumentVersion before replacing it.
+    POST /documents/<id>/versions/upload/
+
+    Bumps the document to a new version:
+      1. Archives the current file + version tag as a DocumentVersion row.
+      2. Replaces Document.file and Document.version with the new upload.
+
+    Enforces 5 MB limit.
+    Project managers may only version documents in their assigned projects.
     """
     permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
     parser_classes     = [MultiPartParser, FormParser]
 
     def post(self, request, document_pk):
-        if request.user.role not in ('project_manager',):
+        if request.user.role not in ('admin', 'project_manager'):
             return Response(
-                {'error': 'Only project managers can upload new versions.'},
-                status=status.HTTP_403_FORBIDDEN
+                {'error': 'Only admins and project managers can upload new versions.'},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
+        size_err = _check_upload_size(request)
+        if size_err:
+            return size_err
+
         try:
-            doc = Document.objects.get(pk=document_pk)
+            doc = _doc_queryset(request.user).get(pk=document_pk)
         except Document.DoesNotExist:
             return Response({'error': 'Document not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -142,50 +218,46 @@ class DocumentVersionUploadView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        # Archive the current file as a version
+        new_version   = serializer.validated_data['version']
+        new_file      = serializer.validated_data['file']
+        change_note   = serializer.validated_data.get('change_note', '')
+
+        # Archive current state
         DocumentVersion.objects.create(
             document    = doc,
             uploaded_by = request.user,
             file        = doc.file,
             version     = doc.version,
-            change_note = f'Archived before update to {serializer.validated_data["version"]}',
+            change_note = change_note or f'Archived before update to {new_version}',
         )
 
-        # Replace current file with new version
-        doc.file    = serializer.validated_data['file']
-        doc.version = serializer.validated_data['version']
-        if serializer.validated_data.get('change_note'):
-            doc.description = serializer.validated_data['change_note']
+        # Promote new file
+        doc.file    = new_file
+        doc.version = new_version
+        if change_note:
+            doc.description = change_note
         doc.save()
 
         return Response(
             DocumentDetailSerializer(doc, context={'request': request}).data,
-            status=status.HTTP_200_OK
+            status=status.HTTP_200_OK,
         )
 
 
 class DocumentCategoryListView(APIView):
-    """Returns all categories with document counts for folder view."""
+    """Returns all categories with document counts scoped to the requesting user."""
     permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get(self, request):
         from .models import DocumentCategory
-        project_ids = get_user_project_ids(request.user)
+        project_ids = get_user_accessible_project_ids(request.user)
 
         categories = []
         for value, label in DocumentCategory.choices:
-            if project_ids is None:
-                count = Document.objects.filter(category=value).count()
-            else:
-                count = Document.objects.filter(
-                    category=value,
-                    project_id__in=project_ids
-                ).count()
-            categories.append({
-                'value': value,
-                'label': label,
-                'count': count,
-            })
+            qs = Document.objects.filter(category=value)
+            if project_ids is not None:
+                qs = qs.filter(project_id__in=project_ids)
+            categories.append({'value': value, 'label': label, 'count': qs.count()})
 
         return Response(categories)
