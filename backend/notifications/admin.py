@@ -1,31 +1,23 @@
-from django.urls import path
-from .views import (
-    NotificationListView,
-    NotificationUnreadCountView,
-    NotificationMarkReadView,
-    NotificationMarkSingleReadView,
-    NotificationDeleteView,
-    ActivityLogListView,
-    ProjectActivityLogView,
-)
+from django.contrib import admin
+from .models import Notification, ActivityLog
 
-urlpatterns = [
-    # Notification list
-    path('',                            NotificationListView.as_view(),         name='notification-list'),
 
-    # Bell icon count
-    path('unread-count/',               NotificationUnreadCountView.as_view(),  name='notification-unread-count'),
+@admin.register(Notification)
+class NotificationAdmin(admin.ModelAdmin):
+    list_display    = ['recipient', 'type', 'title', 'is_read', 'created_at']
+    list_filter     = ['type', 'is_read']
+    search_fields   = ['recipient__email', 'title', 'message']
+    readonly_fields = ['recipient', 'actor', 'type', 'title', 'message',
+                       'is_read', 'read_at', 'project_id', 'milestone_id',
+                       'document_id', 'ticket_id', 'created_at']
+    ordering        = ['-created_at']
 
-    # Bulk mark read
-    path('mark-read/',                  NotificationMarkReadView.as_view(),     name='notification-mark-read'),
 
-    # Single notification actions
-    path('<int:pk>/read/',              NotificationMarkSingleReadView.as_view(), name='notification-read'),
-    path('<int:pk>/',                   NotificationDeleteView.as_view(),       name='notification-delete'),
-
-    # Activity feed — global
-    path('activity/',                   ActivityLogListView.as_view(),          name='activity-log'),
-
-    # Activity feed — per project
-    path('activity/project/<int:project_pk>/', ProjectActivityLogView.as_view(), name='project-activity'),
-]
+@admin.register(ActivityLog)
+class ActivityLogAdmin(admin.ModelAdmin):
+    list_display    = ['actor', 'action', 'entity_type', 'entity_name', 'project', 'created_at']
+    list_filter     = ['action', 'entity_type']
+    search_fields   = ['actor__email', 'entity_name', 'detail']
+    readonly_fields = ['actor', 'project', 'action', 'entity_type',
+                       'entity_id', 'entity_name', 'detail', 'created_at']
+    ordering        = ['-created_at']
