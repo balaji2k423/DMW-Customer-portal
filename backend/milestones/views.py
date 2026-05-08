@@ -50,7 +50,7 @@ def get_accessible_project_ids(user):
 
 
 class MilestoneListCreateView(generics.ListCreateAPIView):
-    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
+    permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
     throttle_classes   = [BurstRateThrottle, SustainedRateThrottle, IPRateThrottle]
     filter_backends    = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
     filterset_fields   = ['status', 'project']
@@ -89,7 +89,7 @@ class MilestoneListCreateView(generics.ListCreateAPIView):
 
 
 class MilestoneDetailView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
+    permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get_queryset(self):
@@ -158,9 +158,9 @@ class MilestoneSignOffView(APIView):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     def delete(self, request, pk):
-        if request.user.role != 'project_manager':
+        if request.user.role not in ('project_manager', 'admin'):
             return Response(
-                {'error': 'Only project managers can remove sign-offs.'},
+                {'error': 'Only project managers or admins can remove sign-offs.'},
                 status=status.HTTP_403_FORBIDDEN
             )
         milestone = self.get_milestone(pk)
@@ -176,7 +176,7 @@ class MilestoneSignOffView(APIView):
 
 class DeliverableListCreateView(generics.ListCreateAPIView):
     serializer_class   = DeliverableSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
+    permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
     filter_backends    = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields   = ['status', 'milestone']
@@ -194,7 +194,7 @@ class DeliverableListCreateView(generics.ListCreateAPIView):
 
 class DeliverableDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class   = DeliverableSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
+    permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get_queryset(self):
