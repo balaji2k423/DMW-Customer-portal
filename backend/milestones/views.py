@@ -13,44 +13,52 @@ from .serializers import (
     DeliverableSerializer,
     SignOffSerializer,
 )
-from .permissions import CanSignOff, IsProjectManagerOrReadOnly, IsAdminOrReadOnly
 
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def get_accessible_project_ids(user):
     """
-    Return a set of project IDs the user can access, or None for full access.
+    Return the set of project IDs this user may access, or None for full access.
 
-    - admin / project_manager  → None  (no filter, see everything)
-    - customer_admin / customer_user / assigned users →
-          projects where user == project.customer  (FK on Project)
-          UNION
-          projects where user is in ProjectMember
-          UNION
-          projects that have at least one milestone owned by this user
-            (so directly-assigned individuals only see their own project)
+    Rules:
+      - admin            → None (skip filter — sees everything)
+      - project_manager  → only projects where they are a ProjectMember
+      - customer_admin   → projects where they are the customer FK OR a ProjectMember
+      - customer_user    → projects where they are the customer FK OR a ProjectMember
     """
     from projects.models import ProjectMember, Project
 
-    if user.role in ('admin', 'project_manager'):
-        return None  # full access — caller skips the filter
+    if user.role == 'admin':
+        return None  # full access — caller skips the queryset filter
 
-    # Force evaluation with list() so we get plain ints, not lazy querysets
-    customer_project_ids = list(
-        Project.objects.filter(customer=user).values_list('id', flat=True)
-    )
     member_project_ids = list(
         ProjectMember.objects.filter(user=user).values_list('project_id', flat=True)
     )
-    # Projects where this user owns at least one milestone (directly assigned)
-    owned_milestone_project_ids = list(
-        Milestone.objects.filter(owner=user).values_list('project_id', flat=True).distinct()
+
+    if user.role == 'project_manager':
+        # PM only sees projects they are explicitly a member of
+        return set(member_project_ids)
+
+    # customer_admin / customer_user
+    customer_project_ids = list(
+        Project.objects.filter(customer=user).values_list('id', flat=True)
     )
+    return set(customer_project_ids) | set(member_project_ids)
 
-    return set(customer_project_ids) | set(member_project_ids) | set(owned_milestone_project_ids)
 
+def user_is_project_member(user, project_id):
+    """Return True if the user belongs to the given project (or is admin)."""
+    from projects.models import ProjectMember
+    if user.role == 'admin':
+        return True
+    return ProjectMember.objects.filter(user=user, project_id=project_id).exists()
+
+
+# ─── Milestones ───────────────────────────────────────────────────────────────
 
 class MilestoneListCreateView(generics.ListCreateAPIView):
-    permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
+    permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, SustainedRateThrottle, IPRateThrottle]
     filter_backends    = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
     filterset_fields   = ['status', 'project']
@@ -62,34 +70,37 @@ class MilestoneListCreateView(generics.ListCreateAPIView):
         project_ids = get_accessible_project_ids(user)
 
         if project_ids is None:
-            # admin / project_manager — see all
             return Milestone.objects.all().select_related('owner', 'project')
 
         if not project_ids:
-            # User has no accessible projects
             return Milestone.objects.none()
 
-        # Non-manager users: only milestones within their accessible projects
-        # AND where they are explicitly the owner (directly assigned to them).
-        # customer_admin / customer_user can see all milestones in their project.
-        qs = Milestone.objects.filter(
+        return Milestone.objects.filter(
             project_id__in=project_ids
         ).select_related('owner', 'project')
-
-        if user.role not in ('customer_admin', 'customer_user'):
-            # Directly-assigned individual — only their own milestones
-            qs = qs.filter(owner=user)
-
-        return qs
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
             return MilestoneCreateUpdateSerializer
         return MilestoneListSerializer
 
+    def create(self, request, *args, **kwargs):
+        if request.user.role not in ('admin', 'project_manager'):
+            return Response(
+                {'error': 'Only admins or project managers can create milestones.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        project_id = request.data.get('project')
+        if project_id and not user_is_project_member(request.user, project_id):
+            return Response(
+                {'error': 'You are not a member of this project.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().create(request, *args, **kwargs)
+
 
 class MilestoneDetailView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
+    permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get_queryset(self):
@@ -102,70 +113,109 @@ class MilestoneDetailView(generics.RetrieveUpdateDestroyAPIView):
         if not project_ids:
             return Milestone.objects.none()
 
-        qs = Milestone.objects.filter(
+        return Milestone.objects.filter(
             project_id__in=project_ids
         ).select_related('owner', 'project')
-
-        if user.role not in ('customer_admin', 'customer_user'):
-            qs = qs.filter(owner=user)
-
-        return qs
 
     def get_serializer_class(self):
         if self.request.method in ('PUT', 'PATCH'):
             return MilestoneCreateUpdateSerializer
         return MilestoneDetailSerializer
 
+    def update(self, request, *args, **kwargs):
+        milestone = self.get_object()
+        if request.user.role not in ('admin', 'project_manager'):
+            return Response(
+                {'error': 'Only admins or project managers can edit milestones.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if not user_is_project_member(request.user, milestone.project_id):
+            return Response(
+                {'error': 'You are not a member of this project.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        milestone = self.get_object()
+        if request.user.role not in ('admin', 'project_manager'):
+            return Response(
+                {'error': 'Only admins or project managers can delete milestones.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if not user_is_project_member(request.user, milestone.project_id):
+            return Response(
+                {'error': 'You are not a member of this project.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().destroy(request, *args, **kwargs)
+
+
+# ─── Sign-off ─────────────────────────────────────────────────────────────────
 
 class MilestoneSignOffView(APIView):
     """
-    POST   — Customer admin signs off a milestone.
-    DELETE — Remove an existing sign-off (project manager only).
+    POST   — customer_admin (who is a project member) signs off a milestone.
+    DELETE — admin or project_manager (who is a project member) removes a sign-off.
     """
     permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get_milestone(self, pk):
         try:
-            return Milestone.objects.get(pk=pk)
+            return Milestone.objects.select_related('project').get(pk=pk)
         except Milestone.DoesNotExist:
             return None
 
     def post(self, request, pk):
-        if request.user.role not in ('customer_admin', 'admin', 'project_manager'):
+        if request.user.role != 'customer_admin':
             return Response(
-                {'error': 'Only admins, project managers, or customer admins can sign off milestones.'},
-                status=status.HTTP_403_FORBIDDEN
+                {'error': 'Only customer admins can sign off milestones.'},
+                status=status.HTTP_403_FORBIDDEN,
             )
+
         milestone = self.get_milestone(pk)
         if not milestone:
             return Response({'error': 'Milestone not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not user_is_project_member(request.user, milestone.project_id):
+            return Response(
+                {'error': 'You are not a member of this project.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         if hasattr(milestone, 'sign_off'):
             return Response(
                 {'error': 'This milestone has already been signed off.'},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
+
         sign_off = SignOff.objects.create(
             milestone=milestone,
             signed_by=request.user,
-            remarks=request.data.get('remarks', '')
+            remarks=request.data.get('remarks', ''),
         )
         milestone.status = Milestone.Status.COMPLETED
         milestone.save()
 
-        serializer = SignOffSerializer(sign_off)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(SignOffSerializer(sign_off).data, status=status.HTTP_201_CREATED)
 
     def delete(self, request, pk):
-        if request.user.role not in ('project_manager', 'admin'):
+        if request.user.role not in ('admin', 'project_manager'):
             return Response(
-                {'error': 'Only project managers or admins can remove sign-offs.'},
-                status=status.HTTP_403_FORBIDDEN
+                {'error': 'Only admins or project managers can remove sign-offs.'},
+                status=status.HTTP_403_FORBIDDEN,
             )
+
         milestone = self.get_milestone(pk)
         if not milestone:
             return Response({'error': 'Milestone not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not user_is_project_member(request.user, milestone.project_id):
+            return Response(
+                {'error': 'You are not a member of this project.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         if not hasattr(milestone, 'sign_off'):
             return Response({'error': 'No sign-off found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -174,9 +224,11 @@ class MilestoneSignOffView(APIView):
         return Response({'message': 'Sign-off removed.'}, status=status.HTTP_204_NO_CONTENT)
 
 
+# ─── Deliverables ─────────────────────────────────────────────────────────────
+
 class DeliverableListCreateView(generics.ListCreateAPIView):
     serializer_class   = DeliverableSerializer
-    permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
+    permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
     filter_backends    = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields   = ['status', 'milestone']
@@ -191,10 +243,24 @@ class DeliverableListCreateView(generics.ListCreateAPIView):
         milestone = Milestone.objects.get(pk=self.kwargs['milestone_pk'])
         serializer.save(milestone=milestone)
 
+    def create(self, request, *args, **kwargs):
+        if request.user.role not in ('admin', 'project_manager'):
+            return Response(
+                {'error': 'Only admins or project managers can add deliverables.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        milestone = Milestone.objects.filter(pk=self.kwargs['milestone_pk']).first()
+        if milestone and not user_is_project_member(request.user, milestone.project_id):
+            return Response(
+                {'error': 'You are not a member of this project.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().create(request, *args, **kwargs)
+
 
 class DeliverableDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class   = DeliverableSerializer
-    permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
+    permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get_queryset(self):
@@ -202,13 +268,35 @@ class DeliverableDetailView(generics.RetrieveUpdateDestroyAPIView):
             milestone_id=self.kwargs['milestone_pk']
         )
 
+    def _check_write_permission(self, request, deliverable):
+        if request.user.role not in ('admin', 'project_manager'):
+            return Response(
+                {'error': 'Only admins or project managers can modify deliverables.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if not user_is_project_member(request.user, deliverable.milestone.project_id):
+            return Response(
+                {'error': 'You are not a member of this project.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return None
+
+    def update(self, request, *args, **kwargs):
+        err = self._check_write_permission(request, self.get_object())
+        return err if err else super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        err = self._check_write_permission(request, self.get_object())
+        return err if err else super().destroy(request, *args, **kwargs)
+
+
+# ─── Timeline ─────────────────────────────────────────────────────────────────
 
 class ProjectMilestoneTimelineView(APIView):
     """
-    Returns all milestones for a specific project ordered for timeline/stepper display.
-    Access:
-      - admin / project_manager → all projects
-      - customer_admin / customer_user → only their accessible projects
+    GET /project/<project_pk>/timeline/
+    Returns all milestones for a project in timeline order.
+    Access: project members only (admin bypasses membership check).
     """
     permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
@@ -217,20 +305,16 @@ class ProjectMilestoneTimelineView(APIView):
         user        = request.user
         project_ids = get_accessible_project_ids(user)
 
-        # None means full access; otherwise verify this project is in the allowed set
+        # None = admin (full access); otherwise verify membership
         if project_ids is not None and int(project_pk) not in project_ids:
             return Response(
                 {'error': 'You do not have access to this project.'},
-                status=status.HTTP_403_FORBIDDEN
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         milestones = Milestone.objects.filter(
             project_id=project_pk
         ).select_related('owner').prefetch_related('deliverables').order_by('order', 'planned_date')
-
-        # Non-manager, non-customer users only see milestones assigned to them
-        if project_ids is not None and user.role not in ('customer_admin', 'customer_user'):
-            milestones = milestones.filter(owner=user)
 
         serializer = MilestoneDetailSerializer(milestones, many=True)
 
