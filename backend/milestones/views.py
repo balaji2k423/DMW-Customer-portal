@@ -21,10 +21,13 @@ def get_accessible_project_ids(user):
     Return a set of project IDs the user can access, or None for full access.
 
     - admin / project_manager  → None  (no filter, see everything)
-    - customer_admin / customer_user →
+    - customer_admin / customer_user / assigned users →
           projects where user == project.customer  (FK on Project)
           UNION
           projects where user is in ProjectMember
+          UNION
+          projects that have at least one milestone owned by this user
+            (so directly-assigned individuals only see their own project)
     """
     from projects.models import ProjectMember, Project
 
@@ -38,8 +41,12 @@ def get_accessible_project_ids(user):
     member_project_ids = list(
         ProjectMember.objects.filter(user=user).values_list('project_id', flat=True)
     )
+    # Projects where this user owns at least one milestone (directly assigned)
+    owned_milestone_project_ids = list(
+        Milestone.objects.filter(owner=user).values_list('project_id', flat=True).distinct()
+    )
 
-    return set(customer_project_ids) | set(member_project_ids)
+    return set(customer_project_ids) | set(member_project_ids) | set(owned_milestone_project_ids)
 
 
 class MilestoneListCreateView(generics.ListCreateAPIView):
@@ -59,12 +66,21 @@ class MilestoneListCreateView(generics.ListCreateAPIView):
             return Milestone.objects.all().select_related('owner', 'project')
 
         if not project_ids:
-            # Customer has no accessible projects
+            # User has no accessible projects
             return Milestone.objects.none()
 
-        return Milestone.objects.filter(
+        # Non-manager users: only milestones within their accessible projects
+        # AND where they are explicitly the owner (directly assigned to them).
+        # customer_admin / customer_user can see all milestones in their project.
+        qs = Milestone.objects.filter(
             project_id__in=project_ids
         ).select_related('owner', 'project')
+
+        if user.role not in ('customer_admin', 'customer_user'):
+            # Directly-assigned individual — only their own milestones
+            qs = qs.filter(owner=user)
+
+        return qs
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -86,9 +102,14 @@ class MilestoneDetailView(generics.RetrieveUpdateDestroyAPIView):
         if not project_ids:
             return Milestone.objects.none()
 
-        return Milestone.objects.filter(
+        qs = Milestone.objects.filter(
             project_id__in=project_ids
         ).select_related('owner', 'project')
+
+        if user.role not in ('customer_admin', 'customer_user'):
+            qs = qs.filter(owner=user)
+
+        return qs
 
     def get_serializer_class(self):
         if self.request.method in ('PUT', 'PATCH'):
@@ -206,6 +227,10 @@ class ProjectMilestoneTimelineView(APIView):
         milestones = Milestone.objects.filter(
             project_id=project_pk
         ).select_related('owner').prefetch_related('deliverables').order_by('order', 'planned_date')
+
+        # Non-manager, non-customer users only see milestones assigned to them
+        if project_ids is not None and user.role not in ('customer_admin', 'customer_user'):
+            milestones = milestones.filter(owner=user)
 
         serializer = MilestoneDetailSerializer(milestones, many=True)
 
