@@ -15,7 +15,7 @@ DEBUG = os.getenv('DEBUG', 'True') == 'True'
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
 INSTALLED_APPS = [
-    'jazzmin',  # ← ADD THIS as the FIRST entry, before django.contrib.admin
+    'jazzmin',
 
     'django.contrib.admin',
     'django.contrib.auth',
@@ -43,12 +43,8 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
-
     'django.middleware.security.SecurityMiddleware',
-
-    # WhiteNoise middleware
     'whitenoise.middleware.WhiteNoiseMiddleware',
-
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -110,16 +106,53 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = '/static/'
-
 STATIC_ROOT = BASE_DIR / 'staticfiles'
-
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedStaticFilesStorage'
 
-# Media files
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '[{levelname}] {asctime} {module} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'WARNING',
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
+        'django.request': {
+            'handlers': ['console'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+        'django.db.backends': {
+            'handlers': ['console'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
+    },
+}
 
 # ─── Django REST Framework ────────────────────────────────────────────────────
 
@@ -241,13 +274,11 @@ JAZZMIN_UI_TWEAKS = {
 
 # ─── Session ──────────────────────────────────────────────────────────────────
 
-SESSION_COOKIE_AGE = 60 * 60          # 1 hour
+SESSION_COOKIE_AGE = 60 * 60
 SESSION_EXPIRE_AT_BROWSER_CLOSE = True
 SESSION_SAVE_EVERY_REQUEST = True
 
 # ─── Dev overrides ────────────────────────────────────────────────────────────
-# Disable throttling completely in local development so sidebar navigation
-# and rapid API calls never trigger 429s during testing.
 
 if DEBUG:
     REST_FRAMEWORK['DEFAULT_THROTTLE_CLASSES'] = []
