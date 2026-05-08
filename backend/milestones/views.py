@@ -132,9 +132,9 @@ class MilestoneSignOffView(APIView):
             return None
 
     def post(self, request, pk):
-        if request.user.role not in ('customer_admin',):
+        if request.user.role not in ('customer_admin', 'admin', 'project_manager'):
             return Response(
-                {'error': 'Only customer admins can sign off milestones.'},
+                {'error': 'Only admins, project managers, or customer admins can sign off milestones.'},
                 status=status.HTTP_403_FORBIDDEN
             )
         milestone = self.get_milestone(pk)
