@@ -1,5 +1,12 @@
 from django.contrib import admin
-from .models import Milestone, Deliverable, SignOff
+from .models import Milestone, Deliverable, SignOff, Subtask
+
+
+class SubtaskInline(admin.TabularInline):
+    model   = Subtask
+    extra   = 0
+    fields  = ['title', 'status', 'assignee_name', 'due_date', 'order']
+    ordering = ['order']
 
 
 class DeliverableInline(admin.TabularInline):
@@ -9,9 +16,9 @@ class DeliverableInline(admin.TabularInline):
 
 
 class SignOffInline(admin.StackedInline):
-    model     = SignOff
-    extra     = 0
-    fields    = ['signed_by', 'signed_at', 'remarks']
+    model           = SignOff
+    extra           = 0
+    fields          = ['signed_by', 'signed_at', 'remarks']
     readonly_fields = ['signed_at']
 
 
@@ -22,11 +29,19 @@ class MilestoneAdmin(admin.ModelAdmin):
     search_fields   = ['title', 'description', 'project__name']
     ordering        = ['project', 'order', 'planned_date']
     readonly_fields = ['created_at', 'updated_at']
-    inlines         = [DeliverableInline, SignOffInline]
+    inlines         = [SubtaskInline, DeliverableInline, SignOffInline]
 
     def is_delayed(self, obj):
         return obj.is_delayed
     is_delayed.boolean = True
+
+
+@admin.register(Subtask)
+class SubtaskAdmin(admin.ModelAdmin):
+    list_display  = ['title', 'milestone', 'status', 'assignee_name', 'order']
+    list_filter   = ['status']
+    search_fields = ['title', 'milestone__title', 'assignee_name']
+    ordering      = ['milestone', 'order']
 
 
 @admin.register(Deliverable)
@@ -38,6 +53,6 @@ class DeliverableAdmin(admin.ModelAdmin):
 
 @admin.register(SignOff)
 class SignOffAdmin(admin.ModelAdmin):
-    list_display  = ['milestone', 'signed_by', 'signed_at']
-    search_fields = ['milestone__title', 'signed_by__email']
+    list_display    = ['milestone', 'signed_by', 'signed_at']
+    search_fields   = ['milestone__title', 'signed_by__email']
     readonly_fields = ['signed_at']

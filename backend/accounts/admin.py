@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import CustomUser
+from .models import CustomUser, GuestPermission
 
 @admin.register(CustomUser)
 class CustomUserAdmin(UserAdmin):
@@ -18,3 +18,11 @@ class CustomUserAdmin(UserAdmin):
     add_fieldsets = (
         (None, {'fields': ('email', 'password1', 'password2', 'first_name', 'last_name', 'role')}),
     )
+
+
+@admin.register(GuestPermission)
+class GuestPermissionAdmin(admin.ModelAdmin):
+    list_display  = ['guest', 'module', 'project_id', 'customer_id']
+    list_filter   = ['module']
+    search_fields = ['guest__email', 'guest__first_name', 'guest__last_name']
+    autocomplete_fields = ['guest']

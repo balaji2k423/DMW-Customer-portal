@@ -33,13 +33,13 @@ class Project(models.Model):
         COMPLETED   = 'completed',   'Completed'
         CANCELLED   = 'cancelled',   'Cancelled'
 
-    # FK to CustomUser (customer_admin / customer_user role)
-    customer        = models.ForeignKey(
-                        settings.AUTH_USER_MODEL,
+    # FK to Company master — admin selects a company first, then picks
+    # one or more customer_admin users from that company as ProjectMembers.
+    company         = models.ForeignKey(
+                        'company_master.Company',        # adjust app label if different
                         on_delete=models.SET_NULL,
                         null=True, blank=True,
                         related_name='projects',
-                        limit_choices_to={'role__in': ['customer_admin', 'customer_user']},
                       )
     name            = models.CharField(max_length=200)
     description     = models.TextField(blank=True)
@@ -55,14 +55,14 @@ class Project(models.Model):
     updated_at      = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"{self.name} — {self.customer.full_name if self.customer else 'No Customer'}"
+        return f"{self.name} — {self.company.company_name if self.company else 'No Company'}"
 
     class Meta:
         ordering = ['-created_at']
         constraints = [
             models.UniqueConstraint(
-                fields=['customer', 'name'],
-                name='unique_project_name_per_customer',
+                fields=['company', 'name'],
+                name='unique_project_name_per_company',
             )
         ]
 

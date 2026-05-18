@@ -2,6 +2,9 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import Customer, Project, ProjectMember
 
+# Import Company from its own app (adjust if your app label differs)
+from company_master.models import Company
+
 User = get_user_model()
 
 
@@ -14,23 +17,34 @@ class CustomerSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 
-# ─── Customer dropdown ────────────────────────────────────────────────────────
-# Now returns CustomUser records filtered to customer_admin / customer_user.
-# Shape: { id, name } — "name" is company if set, otherwise full_name.
-# The frontend <select> sends user.id as the project.customer FK value.
+# ─── Company dropdown ─────────────────────────────────────────────────────────
+# Step 1: admin picks a company from the Company master.
+# Shape: { id, company_name, city, state }
 
-class CustomerDropdownSerializer(serializers.ModelSerializer):
-    name = serializers.SerializerMethodField()
+class CompanyDropdownSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = Company
+        fields = ['id', 'company_name', 'city', 'state']
 
-    def get_name(self, obj):
-        return obj.company.strip() if obj.company.strip() else obj.full_name
+
+# ─── Customer-admin dropdown (filtered by company) ───────────────────────────
+# Step 2: after picking a company, load its customer_admin users.
+# Shape: { id, full_name, email }
+# The frontend sends these user ids as member_assignments with role=customer_admin.
+
+class CustomerAdminDropdownSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+
+    def get_full_name(self, obj):
+        name = f"{obj.first_name or ''} {obj.last_name or ''}".strip()
+        return name or obj.email
 
     class Meta:
         model  = User
-        fields = ['id', 'name']
+        fields = ['id', 'email', 'full_name']
 
 
-# ─── User dropdown (for assigning team members) ───────────────────────────────
+# ─── User dropdown (for assigning all team members) ───────────────────────────
 
 class UserDropdownSerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
@@ -68,32 +82,42 @@ class MemberInputSerializer(serializers.Serializer):
 # ─── Project List ─────────────────────────────────────────────────────────────
 
 class ProjectListSerializer(serializers.ModelSerializer):
-    customer_name = serializers.SerializerMethodField()
-    member_count  = serializers.SerializerMethodField()
+    company_name    = serializers.SerializerMethodField()
+    member_count    = serializers.SerializerMethodField()
+    # Convenience: list of customer_admin names shown on the card
+    customer_admins = serializers.SerializerMethodField()
 
     class Meta:
         model  = Project
         fields = [
-            'id', 'name', 'customer', 'customer_name', 'status', 'progress',
-            'robot_model', 'start_date', 'expected_end', 'member_count', 'created_at',
+            'id', 'name', 'company', 'company_name', 'customer_admins',
+            'status', 'progress', 'robot_model', 'start_date',
+            'expected_end', 'member_count', 'created_at',
         ]
 
-    def get_customer_name(self, obj):
-        if not obj.customer:
-            return None
-        # Show company name if set, otherwise full name
-        return obj.customer.company.strip() if obj.customer.company.strip() else obj.customer.full_name
+    def get_company_name(self, obj):
+        return obj.company.company_name if obj.company else None
 
     def get_member_count(self, obj):
         return obj.members.count()
+
+    def get_customer_admins(self, obj):
+        """Return names of all customer_admin members on this project."""
+        admins = obj.members.filter(role=ProjectMember.MemberRole.CUSTOMER_ADMIN).select_related('user')
+        result = []
+        for m in admins:
+            name = f"{m.user.first_name or ''} {m.user.last_name or ''}".strip()
+            result.append(name or m.user.email)
+        return result
 
 
 # ─── Project Detail / Create ──────────────────────────────────────────────────
 
 class ProjectDetailSerializer(serializers.ModelSerializer):
-    customer_name  = serializers.SerializerMethodField()
-    members        = ProjectMemberSerializer(many=True, read_only=True)
-    days_remaining = serializers.SerializerMethodField()
+    company_name    = serializers.SerializerMethodField()
+    members         = ProjectMemberSerializer(many=True, read_only=True)
+    days_remaining  = serializers.SerializerMethodField()
+    customer_admins = serializers.SerializerMethodField()
 
     # Write-only: list of {user, role} objects to assign on create/update
     member_assignments = MemberInputSerializer(many=True, write_only=True, required=False)
@@ -103,10 +127,16 @@ class ProjectDetailSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
 
-    def get_customer_name(self, obj):
-        if not obj.customer:
-            return None
-        return obj.customer.company.strip() if obj.customer.company.strip() else obj.customer.full_name
+    def get_company_name(self, obj):
+        return obj.company.company_name if obj.company else None
+
+    def get_customer_admins(self, obj):
+        admins = obj.members.filter(role=ProjectMember.MemberRole.CUSTOMER_ADMIN).select_related('user')
+        result = []
+        for m in admins:
+            name = f"{m.user.first_name or ''} {m.user.last_name or ''}".strip()
+            result.append({'id': m.user.id, 'name': name or m.user.email, 'email': m.user.email})
+        return result
 
     def get_days_remaining(self, obj):
         if obj.expected_end:
@@ -119,26 +149,33 @@ class ProjectDetailSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('Progress must be between 0 and 100.')
         return value
 
-    def validate_customer(self, value):
-        """Ensure the assigned user actually has a customer role."""
-        if value and value.role not in ('customer_admin', 'customer_user'):
-            raise serializers.ValidationError(
-                'The selected user must have a customer_admin or customer_user role.'
-            )
-        return value
-
     def validate(self, attrs):
-        # Enforce composite unique: customer + name
-        customer = attrs.get('customer', getattr(self.instance, 'customer', None))
-        name     = attrs.get('name',     getattr(self.instance, 'name', None))
+        # Enforce composite unique: company + name
+        company = attrs.get('company', getattr(self.instance, 'company', None))
+        name    = attrs.get('name',    getattr(self.instance, 'name', None))
 
-        qs = Project.objects.filter(customer=customer, name=name)
+        qs = Project.objects.filter(company=company, name=name)
         if self.instance:
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
             raise serializers.ValidationError(
-                {'name': f'A project named "{name}" already exists for this customer.'}
+                {'name': f'A project named "{name}" already exists for this company.'}
             )
+
+        # Validate that member_assignments tagged customer_admin belong to the chosen company
+        member_assignments = attrs.get('member_assignments', [])
+        if company and member_assignments:
+            for entry in member_assignments:
+                user = entry['user']
+                role = entry.get('role', '')
+                if role == ProjectMember.MemberRole.CUSTOMER_ADMIN:
+                    if str(getattr(user, 'company_id', None)) != str(company.id) and \
+                       getattr(user, 'company', None) != company.company_name:
+                        raise serializers.ValidationError(
+                            {'member_assignments': (
+                                f'User {user.email} does not belong to {company.company_name}.'
+                            )}
+                        )
         return attrs
 
     def create(self, validated_data):
@@ -173,22 +210,29 @@ class ProjectDetailSerializer(serializers.ModelSerializer):
 # ─── Dashboard ────────────────────────────────────────────────────────────────
 
 class DashboardSerializer(serializers.ModelSerializer):
-    customer_name  = serializers.SerializerMethodField()
-    open_tickets   = serializers.SerializerMethodField()
-    next_milestone = serializers.SerializerMethodField()
+    company_name    = serializers.SerializerMethodField()
+    customer_admins = serializers.SerializerMethodField()
+    open_tickets    = serializers.SerializerMethodField()
+    next_milestone  = serializers.SerializerMethodField()
 
     class Meta:
         model  = Project
         fields = [
-            'id', 'name', 'customer_name', 'status', 'progress',
+            'id', 'name', 'company_name', 'customer_admins', 'status', 'progress',
             'robot_model', 'contract_number', 'start_date', 'expected_end',
             'open_tickets', 'next_milestone',
         ]
 
-    def get_customer_name(self, obj):
-        if not obj.customer:
-            return None
-        return obj.customer.company.strip() if obj.customer.company.strip() else obj.customer.full_name
+    def get_company_name(self, obj):
+        return obj.company.company_name if obj.company else None
+
+    def get_customer_admins(self, obj):
+        admins = obj.members.filter(role=ProjectMember.MemberRole.CUSTOMER_ADMIN).select_related('user')
+        result = []
+        for m in admins:
+            name = f"{m.user.first_name or ''} {m.user.last_name or ''}".strip()
+            result.append(name or m.user.email)
+        return result
 
     def get_open_tickets(self, obj):
         return obj.tickets.filter(status__in=['open', 'in_progress']).count()

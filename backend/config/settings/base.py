@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     'documents',
     'tickets',
     'notifications',
+    'company_master',
 ]
 
 MIDDLEWARE = [

@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import CustomUser
+from .models import CustomUser, GuestPermission
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -80,3 +80,39 @@ class AdminUpdateUserSerializer(serializers.ModelSerializer):
 class ChangePasswordSerializer(serializers.Serializer):
     old_password = serializers.CharField(write_only=True)
     new_password = serializers.CharField(write_only=True, min_length=8)
+
+
+# ─── Guest permissions ────────────────────────────────────────────────────────
+
+class GuestPermissionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = GuestPermission
+        fields = ['id', 'module', 'project_id', 'customer_id']
+        read_only_fields = ['id']
+
+
+class GuestPermissionBulkSerializer(serializers.Serializer):
+    """
+    Accepts a list of permission objects and replaces all existing permissions
+    for the given guest in one atomic operation.
+
+    Example payload:
+    {
+        "permissions": [
+            {"module": "dashboard"},
+            {"module": "tickets", "project_id": 12},
+            {"module": "milestones", "customer_id": 7}
+        ]
+    }
+    """
+    permissions = GuestPermissionSerializer(many=True)
+
+    def save(self, guest):
+        perms_data = self.validated_data['permissions']
+        # Replace all permissions atomically
+        GuestPermission.objects.filter(guest=guest).delete()
+        GuestPermission.objects.bulk_create([
+            GuestPermission(guest=guest, **perm)
+            for perm in perms_data
+        ])
+        return GuestPermission.objects.filter(guest=guest)

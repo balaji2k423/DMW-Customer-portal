@@ -73,6 +73,38 @@ class Deliverable(models.Model):
         return f"{self.title} ({self.milestone.title})"
 
 
+class Subtask(models.Model):
+    """
+    Actionable checklist items nested under a Milestone.
+    The frontend tracks todo → in_progress → done → approved states.
+    """
+
+    class Status(models.TextChoices):
+        TODO        = 'todo',        'To Do'
+        IN_PROGRESS = 'in_progress', 'In Progress'
+        DONE        = 'done',        'Done'
+        APPROVED    = 'approved',    'Approved'
+
+    milestone     = models.ForeignKey(
+        Milestone,
+        on_delete=models.CASCADE,
+        related_name='subtasks'
+    )
+    title         = models.CharField(max_length=300)
+    status        = models.CharField(max_length=20, choices=Status.choices, default=Status.TODO)
+    assignee_name = models.CharField(max_length=150, blank=True)
+    due_date      = models.DateField(null=True, blank=True)
+    order         = models.PositiveIntegerField(default=0, help_text='Display order within milestone')
+    created_at    = models.DateTimeField(auto_now_add=True)
+    updated_at    = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['order', 'created_at']
+
+    def __str__(self):
+        return f"{self.title} [{self.get_status_display()}] — {self.milestone.title}"
+
+
 class SignOff(models.Model):
     """Customer sign-off record per milestone."""
     milestone  = models.OneToOneField(

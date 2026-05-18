@@ -1,3 +1,7 @@
+"""
+documents/views.py
+"""
+
 import os
 from django.http import FileResponse, Http404
 from rest_framework import generics, status, filters
@@ -18,44 +22,50 @@ from .serializers import (
     DocumentVersionUploadSerializer,
 )
 
-MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB — enforced at view level for all uploads
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
 def get_user_accessible_project_ids(user):
     """
     Returns:
-      - None  → user is admin (all projects)
-      - list  → project IDs the user can see
+      - None → admin (unrestricted, sees all projects)
+      - list → project IDs the user can see via ProjectMember membership
+
+    BUG FIX: removed Q(customer=user) — Project.customer FK no longer exists.
+    Membership for all non-admin roles is tracked solely through ProjectMember.
 
     Scoping rules:
-      • admin           → all projects (None)
-      • project_manager → only projects they are a member of
-      • customer_*      → projects where they are the customer FK or a ProjectMember
+      admin           → None (all projects)
+      project_manager → projects they are explicitly assigned to as a ProjectMember
+      customer_*      → projects they are a ProjectMember of
     """
     if user.role == 'admin':
         return None  # unrestricted
 
-    if user.role == 'project_manager':
-        return list(
-            ProjectMember.objects.filter(user=user).values_list('project_id', flat=True)
-        )
-
-    # customer_admin / customer_user
-    from django.db.models import Q
     return list(
-        Project.objects.filter(
-            Q(customer=user) | Q(members__user=user)
-        ).distinct().values_list('id', flat=True)
+        ProjectMember.objects.filter(user=user).values_list('project_id', flat=True)
     )
 
 
-def _doc_queryset(user):
+def _doc_queryset(user, customer_admin_id=None):
     """Shared filtered queryset for documents."""
     project_ids = get_user_accessible_project_ids(user)
     qs = Document.objects.select_related('project', 'uploaded_by')
+
     if project_ids is None:
-        return qs.all()
-    return qs.filter(project_id__in=project_ids)
+        qs = qs.all()
+    else:
+        qs = qs.filter(project_id__in=project_ids)
+
+    # Optional: further scope to projects where a specific customer_admin is a member
+    if customer_admin_id:
+        ca_project_ids = list(
+            ProjectMember.objects.filter(user_id=customer_admin_id)
+            .values_list('project_id', flat=True)
+        )
+        qs = qs.filter(project_id__in=ca_project_ids)
+
+    return qs
 
 
 def _check_upload_size(request):
@@ -79,20 +89,19 @@ class DocumentListCreateView(generics.ListCreateAPIView):
     ordering_fields    = ['created_at', 'title', 'category', 'file_size']
 
     def get_queryset(self):
-        return _doc_queryset(self.request.user)
+        customer_admin_id = self.request.query_params.get('customer_admin_id')
+        return _doc_queryset(self.request.user, customer_admin_id=customer_admin_id)
 
     def get_serializer_class(self):
         return DocumentUploadSerializer if self.request.method == 'POST' else DocumentListSerializer
 
     def create(self, request, *args, **kwargs):
-        # Only admin and project_manager can upload
         if request.user.role not in ('admin', 'project_manager'):
             return Response(
                 {'error': 'Only admins and project managers can upload documents.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # 5 MB guard
         size_err = _check_upload_size(request)
         if size_err:
             return size_err
@@ -173,7 +182,6 @@ class DocumentVersionListView(generics.ListAPIView):
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get_queryset(self):
-        # Ensure the caller can actually see this document
         try:
             _doc_queryset(self.request.user).get(pk=self.kwargs['document_pk'])
         except Document.DoesNotExist:
@@ -190,9 +198,6 @@ class DocumentVersionUploadView(APIView):
     Bumps the document to a new version:
       1. Archives the current file + version tag as a DocumentVersion row.
       2. Replaces Document.file and Document.version with the new upload.
-
-    Enforces 5 MB limit.
-    Project managers may only version documents in their assigned projects.
     """
     permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
@@ -218,9 +223,9 @@ class DocumentVersionUploadView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        new_version   = serializer.validated_data['version']
-        new_file      = serializer.validated_data['file']
-        change_note   = serializer.validated_data.get('change_note', '')
+        new_version = serializer.validated_data['version']
+        new_file    = serializer.validated_data['file']
+        change_note = serializer.validated_data.get('change_note', '')
 
         # Archive current state
         DocumentVersion.objects.create(

@@ -6,18 +6,20 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from api.throttling import LoginThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
-from .models import CustomUser, UserRole
+from .models import CustomUser, UserRole, GuestPermission
 from .serializers import (
     AdminCreateUserSerializer,
     AdminUpdateUserSerializer,
     CustomTokenObtainPairSerializer,
+    GuestPermissionBulkSerializer,
+    GuestPermissionSerializer,
     UserSerializer,
     RegisterSerializer,
     ChangePasswordSerializer,
 )
 
 
-# ─── Custom permission ────────────────────────────────────────────────────────
+# ─── Custom permissions ───────────────────────────────────────────────────────
 
 class IsAdmin(BasePermission):
     """Allow access only to users with role='admin'."""
@@ -133,3 +135,52 @@ class CustomerUserListView(generics.ListAPIView):
         return CustomUser.objects.filter(
             role__in=[UserRole.CUSTOMER_ADMIN, UserRole.CUSTOMER_USER]
         ).order_by('first_name', 'last_name')
+
+
+# ─── Guest permission views ───────────────────────────────────────────────────
+
+class GuestPermissionView(APIView):
+    """
+    GET  /admin/users/<pk>/guest-permissions/
+        → Returns the current list of GuestPermission rows for the guest.
+
+    PUT  /admin/users/<pk>/guest-permissions/
+        → Replaces ALL permissions for this guest with the submitted list.
+        Payload: { "permissions": [ {"module": "dashboard"}, ... ] }
+
+    Only accessible by admins. The target user must have role='guest'.
+    """
+    permission_classes = [IsAuthenticated, IsAdmin]
+
+    def _get_guest_or_404(self, pk):
+        try:
+            user = CustomUser.objects.get(pk=pk, role=UserRole.GUEST)
+        except CustomUser.DoesNotExist:
+            return None
+        return user
+
+    def get(self, request, pk):
+        guest = self._get_guest_or_404(pk)
+        if guest is None:
+            return Response(
+                {'detail': 'Guest user not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        perms = GuestPermission.objects.filter(guest=guest)
+        return Response(GuestPermissionSerializer(perms, many=True).data)
+
+    def put(self, request, pk):
+        guest = self._get_guest_or_404(pk)
+        if guest is None:
+            return Response(
+                {'detail': 'Guest user not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        serializer = GuestPermissionBulkSerializer(data=request.data)
+        if serializer.is_valid():
+            updated_perms = serializer.save(guest=guest)
+            return Response(
+                GuestPermissionSerializer(updated_perms, many=True).data,
+                status=status.HTTP_200_OK,
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

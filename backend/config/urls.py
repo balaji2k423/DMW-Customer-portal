@@ -3,6 +3,7 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+from milestones.urls import subtask_detail_urlpatterns   # ← add this
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -11,8 +12,8 @@ urlpatterns = [
     path('api/schema/swagger-ui/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
     path('api/v1/auth/',        include('accounts.urls')),
     path('api/v1/milestones/', include('milestones.urls')),
+    path('api/v1/subtasks/',   include(subtask_detail_urlpatterns)),
     path('api/v1/documents/', include('documents.urls')),
     path('api/v1/tickets/', include('tickets.urls')),
     path('api/v1/notifications/', include('notifications.urls')),
-    
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

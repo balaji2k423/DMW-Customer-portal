@@ -1,11 +1,14 @@
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
 
+
 class UserRole(models.TextChoices):
     ADMIN           = 'admin',           'Admin'
     CUSTOMER_ADMIN  = 'customer_admin',  'Customer Admin'
     CUSTOMER_USER   = 'customer_user',   'Customer User'
     PROJECT_MANAGER = 'project_manager', 'Project Manager'
+    GUEST           = 'guest',           'Guest'
+
 
 class CustomUserManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
@@ -23,21 +26,22 @@ class CustomUserManager(BaseUserManager):
         extra_fields.setdefault('role', UserRole.ADMIN)
         return self.create_user(email, password, **extra_fields)
 
+
 class CustomUser(AbstractBaseUser, PermissionsMixin):
-    email      = models.EmailField(unique=True)
-    first_name = models.CharField(max_length=100)
-    last_name  = models.CharField(max_length=100)
-    role       = models.CharField(max_length=20, choices=UserRole.choices, default=UserRole.CUSTOMER_USER)
-    company    = models.CharField(max_length=200, blank=True)
-    phone      = models.CharField(max_length=20, blank=True)
+    email       = models.EmailField(unique=True)
+    first_name  = models.CharField(max_length=100)
+    last_name   = models.CharField(max_length=100)
+    role        = models.CharField(max_length=20, choices=UserRole.choices, default=UserRole.CUSTOMER_USER)
+    company     = models.CharField(max_length=200, blank=True)
+    phone       = models.CharField(max_length=20, blank=True)
     mfa_enabled = models.BooleanField(default=False)
-    is_active  = models.BooleanField(default=True)
-    is_staff   = models.BooleanField(default=False)
+    is_active   = models.BooleanField(default=True)
+    is_staff    = models.BooleanField(default=False)
     date_joined = models.DateTimeField(auto_now_add=True)
 
     objects = CustomUserManager()
 
-    USERNAME_FIELD = 'email'
+    USERNAME_FIELD  = 'email'
     REQUIRED_FIELDS = ['first_name', 'last_name']
 
     def __str__(self):
@@ -46,3 +50,48 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     @property
     def full_name(self):
         return f"{self.first_name} {self.last_name}"
+
+
+# ─── Guest permission modules ─────────────────────────────────────────────────
+
+class GuestModule(models.TextChoices):
+    DASHBOARD   = 'dashboard',   'Dashboard'
+    TICKETS     = 'tickets',     'Tickets'
+    MILESTONES  = 'milestones',  'Milestones'
+
+
+class GuestPermission(models.Model):
+    """
+    One row = one module that a guest user is allowed to access,
+    optionally scoped to a specific project or customer (by ID / slug).
+
+    If project_id and customer_id are both null the permission is global
+    for that module (admin can decide granularity).
+    """
+    guest      = models.ForeignKey(
+        CustomUser,
+        on_delete=models.CASCADE,
+        related_name='guest_permissions',
+        limit_choices_to={'role': UserRole.GUEST},
+    )
+    module     = models.CharField(max_length=30, choices=GuestModule.choices)
+
+    # Optional scope — store the PK of the related Project / Customer.
+    # These are plain IntegerFields (no FK) so this app stays decoupled
+    # from whatever models live in your projects/customers apps.
+    project_id  = models.IntegerField(null=True, blank=True)
+    customer_id = models.IntegerField(null=True, blank=True)
+
+    class Meta:
+        # Prevent duplicating the exact same permission row
+        unique_together = ('guest', 'module', 'project_id', 'customer_id')
+        ordering = ['module']
+
+    def __str__(self):
+        scope_parts = []
+        if self.project_id:
+            scope_parts.append(f"project={self.project_id}")
+        if self.customer_id:
+            scope_parts.append(f"customer={self.customer_id}")
+        scope = f" [{', '.join(scope_parts)}]" if scope_parts else " [global]"
+        return f"{self.guest.email} → {self.module}{scope}"

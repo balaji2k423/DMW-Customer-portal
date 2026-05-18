@@ -1,5 +1,6 @@
 from django.urls import path
 from .views import (
+    TicketCustomerListView,
     TicketListCreateView,
     TicketDetailView,
     TicketStatusChangeView,
@@ -14,6 +15,9 @@ from .views import (
 urlpatterns = [
     # Summary stats for dashboard
     path('summary/',                                        TicketSummaryView.as_view(),            name='ticket-summary'),
+
+    # Customer lookup (mirrors milestones customers endpoint)
+    path('customers/',                                      TicketCustomerListView.as_view(),       name='ticket-customers'),
 
     # Tickets CRUD
     path('',                                                TicketListCreateView.as_view(),         name='ticket-list'),

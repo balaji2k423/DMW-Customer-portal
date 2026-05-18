@@ -1,15 +1,5 @@
 """
 tickets/views.py
-
-Key changes vs original:
-  1. get_user_project_ids — customers see projects where they are the customer FK
-     OR a ProjectMember (fixes empty ticket list for project-owner customers).
-  2. get_user_project_ids — project_manager now scoped to their ProjectMember
-     assignments only. Previously returned None ("all projects") — fixed so PMs
-     only see tickets for projects they are explicitly a member of.
-  3. Only admin role retains the "see all" behaviour.
-  4. Same fix applied to projects/views.py get_customer_projects helper is mirrored
-     here for consistency.
 """
 
 from rest_framework import generics, status, filters
@@ -18,7 +8,6 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from django_filters.rest_framework import DjangoFilterBackend
-from django.db.models import Q
 from django.utils import timezone
 
 from api.throttling import BurstRateThrottle, SustainedRateThrottle, IPRateThrottle
@@ -35,33 +24,24 @@ from .serializers import (
 )
 
 # ── Role sets ──────────────────────────────────────────────────────────────────
-CUSTOMER_ROLES  = ('customer_admin', 'customer_user')
-STAFF_ROLES     = ('project_manager', 'admin')
+CUSTOMER_ROLES = ('customer_admin', 'customer_user')
+STAFF_ROLES    = ('project_manager', 'admin')
 
 
 def get_user_project_ids(user):
     """
-    Returns a queryset of project IDs visible to the user, or None for admins.
+    Returns a queryset/list of project IDs visible to the user, or None for admins.
 
     admin           → None  (sees every project / ticket)
     project_manager → only projects they are a ProjectMember of
-    customer_*      → projects where they are the customer FK owner OR a ProjectMember
+    customer_*      → only projects they are a ProjectMember of
     """
     if user.role == 'admin':
         return None  # None == "all projects"
 
-    member_project_ids = ProjectMember.objects.filter(
+    return ProjectMember.objects.filter(
         user=user
     ).values_list('project_id', flat=True)
-
-    if user.role == 'project_manager':
-        # PMs only see projects they were explicitly assigned to as a member
-        return member_project_ids
-
-    # customer_admin / customer_user
-    return Project.objects.filter(
-        Q(customer=user) | Q(id__in=member_project_ids)
-    ).values_list('id', flat=True).distinct()
 
 
 def get_ticket_queryset(user):
@@ -70,6 +50,71 @@ def get_ticket_queryset(user):
     if project_ids is None:
         return qs
     return qs.filter(project_id__in=project_ids)
+
+
+# ── Customer list (mirrors milestones CustomerListView) ────────────────────────
+
+class TicketCustomerListView(APIView):
+    """
+    GET /tickets/customers/
+
+    Returns the distinct list of customers (companies) whose projects have
+    at least one ticket visible to the requesting user.
+
+    Staff (admin / project_manager) see all customers.
+    Customers only see their own company — so the list will contain just
+    themselves, which is fine (the frontend can hide the dropdown if len == 1).
+
+    Response shape:
+        [{ "id": <int|str>, "name": "<company name>" }, ...]
+
+    We derive the customer from project.company (same pattern as the
+    milestones app).  Falls back gracefully if the relation doesn't exist.
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_classes   = [BurstRateThrottle, IPRateThrottle]
+
+    def get(self, request):
+        qs = get_ticket_queryset(request.user)
+
+        # Collect distinct project IDs from visible tickets
+        project_ids = qs.values_list('project_id', flat=True).distinct()
+
+        # Pull projects and extract their company / customer
+        projects = Project.objects.filter(id__in=project_ids).select_related('company')
+
+        seen   = {}   # id → name, deduplication
+        result = []
+
+        for project in projects:
+            try:
+                company = getattr(project, 'company', None)
+                if not company:
+                    continue
+
+                cid = company.id
+
+                if cid in seen:
+                    continue
+
+                # Resolve display name — mirrors _safe_customer_name in milestones
+                name = getattr(company, 'full_name', None)
+                if not name:
+                    get_full = getattr(company, 'get_full_name', None)
+                    if callable(get_full):
+                        name = get_full()
+                if not name or not name.strip():
+                    name = getattr(company, 'email', None) or str(company)
+
+                seen[cid] = name
+                result.append({'id': cid, 'name': name})
+
+            except Exception:
+                continue
+
+        # Stable alphabetical sort
+        result.sort(key=lambda x: x['name'].lower())
+        return Response(result)
 
 
 # ── Ticket list / create ───────────────────────────────────────────────────────
@@ -83,7 +128,20 @@ class TicketListCreateView(generics.ListCreateAPIView):
     ordering_fields    = ['created_at', 'updated_at', 'priority', 'sla_due']
 
     def get_queryset(self):
-        return get_ticket_queryset(self.request.user)
+        qs = get_ticket_queryset(self.request.user)
+
+        # ── Customer filter ──────────────────────────────────────────────────
+        # ?customer_id=<id>  — filter tickets whose project belongs to the
+        # given company/customer.  Staff-only in practice; customers will only
+        # ever see their own tickets anyway.
+        customer_id = self.request.query_params.get('customer_id')
+        if customer_id:
+            try:
+                qs = qs.filter(project__company_id=customer_id)
+            except Exception:
+                pass  # silently ignore if company FK doesn't exist
+
+        return qs
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -93,7 +151,6 @@ class TicketListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         user = self.request.user
 
-        # ── RULE: only customers may raise tickets ────────────────────────────
         if user.role not in CUSTOMER_ROLES:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied(
@@ -102,7 +159,6 @@ class TicketListCreateView(generics.ListCreateAPIView):
 
         ticket = serializer.save(raised_by=user)
 
-        # Record initial status in history
         TicketStatusHistory.objects.create(
             ticket      = ticket,
             changed_by  = user,
@@ -111,7 +167,6 @@ class TicketListCreateView(generics.ListCreateAPIView):
             note        = 'Ticket created',
         )
 
-        # Notify assigned project managers / admins
         self._notify_staff(ticket, user)
 
     @staticmethod
@@ -122,10 +177,7 @@ class TicketListCreateView(generics.ListCreateAPIView):
             from notifications.models import Notification
 
             User = get_user_model()
-            staff = User.objects.filter(
-                role__in=STAFF_ROLES,
-                is_active=True,
-            )
+            staff = User.objects.filter(role__in=STAFF_ROLES, is_active=True)
             for staff_user in staff:
                 Notification.objects.create(
                     recipient  = staff_user,
@@ -176,10 +228,10 @@ class TicketStatusChangeView(APIView):
 
     Permission matrix
     ─────────────────
-    customer_admin  : open, closed  (raise + close only)
-    customer_user   : open          (raise only — cannot close)
+    customer_admin  : open, closed
+    customer_user   : open
     project_manager : open, in_progress, on_hold, resolved, closed
-    admin           : in_progress, on_hold, resolved   ← NOT open, NOT closed
+    admin           : in_progress, on_hold, resolved
     """
     permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
@@ -225,7 +277,6 @@ class TicketStatusChangeView(APIView):
             note        = note,
         )
 
-        # Notify raised_by when ticket is resolved/closed by staff
         if new_status in ('resolved', 'closed') and ticket.raised_by:
             try:
                 from notifications.models import Notification
@@ -262,7 +313,7 @@ class TicketCommentListCreateView(generics.ListCreateAPIView):
         qs = TicketComment.objects.filter(
             ticket_id=self.kwargs['ticket_pk']
         ).select_related('author')
-        if self.request.user.role != 'project_manager':
+        if self.request.user.role not in STAFF_ROLES:
             qs = qs.filter(is_internal=False)
         return qs
 
@@ -387,6 +438,14 @@ class TicketSummaryView(APIView):
 
     def get(self, request):
         qs = get_ticket_queryset(request.user)
+
+        # ── Customer filter — keeps summary stats consistent with the list ──
+        customer_id = request.query_params.get('customer_id')
+        if customer_id:
+            try:
+                qs = qs.filter(project__company_id=customer_id)
+            except Exception:
+                pass
 
         summary = {
             'total':       qs.count(),
