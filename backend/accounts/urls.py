@@ -1,4 +1,5 @@
 # accounts/urls.py
+
 from django.urls import path
 from .views import (
     LoginView,
@@ -11,6 +12,7 @@ from .views import (
     AdminCreateUserView,
     CustomerUserListView,
     GuestPermissionView,
+    UsersByCompanyView,
 )
 
 urlpatterns = [
@@ -21,10 +23,14 @@ urlpatterns = [
     path('logout/',          LogoutView.as_view(),           name='logout'),
 
     # Admin — users
-    path('admin/users/',              AdminUserListView.as_view(),    name='admin-user-list'),
-    path('admin/users/create/',       AdminCreateUserView.as_view(),  name='admin-user-create'),
-    path('admin/users/<int:pk>/',     AdminUserDetailView.as_view(),  name='admin-user-detail'),
-    path('admin/customer-users/',     CustomerUserListView.as_view(), name='admin-customer-user-list'),
+    path('admin/users/',          AdminUserListView.as_view(),    name='admin-user-list'),
+    path('admin/users/create/',   AdminCreateUserView.as_view(),  name='admin-user-create'),
+    path('admin/users/<int:pk>/', AdminUserDetailView.as_view(),  name='admin-user-detail'),
+    path('admin/customer-users/', CustomerUserListView.as_view(), name='admin-customer-user-list'),
+
+    # Admin — users filtered by company (replaces company-customer-map approach)
+    # GET ?company_id=<id>  →  [ {id, email, first_name, last_name, role}, … ]
+    path('admin/users-by-company/', UsersByCompanyView.as_view(), name='admin-users-by-company'),
 
     # Admin — guest permissions
     path(

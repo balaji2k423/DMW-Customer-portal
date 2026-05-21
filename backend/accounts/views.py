@@ -1,3 +1,5 @@
+# accounts/views.py
+
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -17,12 +19,12 @@ from .serializers import (
     RegisterSerializer,
     ChangePasswordSerializer,
 )
+from company_master.models import Company
 
 
 # ─── Custom permissions ───────────────────────────────────────────────────────
 
 class IsAdmin(BasePermission):
-    """Allow access only to users with role='admin'."""
     def has_permission(self, request, view):
         return bool(
             request.user and
@@ -101,12 +103,6 @@ class AdminUserListView(generics.ListAPIView):
 
 
 class AdminUserDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """
-    GET    /admin/users/<pk>/  → retrieve (UserSerializer)
-    PATCH  /admin/users/<pk>/  → partial update incl. optional password (AdminUpdateUserSerializer)
-    PUT    /admin/users/<pk>/  → full update incl. optional password (AdminUpdateUserSerializer)
-    DELETE /admin/users/<pk>/  → delete
-    """
     queryset = CustomUser.objects.all()
     permission_classes = [IsAuthenticated, IsAdmin]
 
@@ -117,10 +113,6 @@ class AdminUserDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class AdminCreateUserView(generics.CreateAPIView):
-    """
-    POST /admin/users/create/
-    password is optional — a random one is auto-generated when omitted.
-    """
     queryset = CustomUser.objects.all()
     serializer_class = AdminCreateUserSerializer
     permission_classes = [IsAuthenticated, IsAdmin]
@@ -140,42 +132,25 @@ class CustomerUserListView(generics.ListAPIView):
 # ─── Guest permission views ───────────────────────────────────────────────────
 
 class GuestPermissionView(APIView):
-    """
-    GET  /admin/users/<pk>/guest-permissions/
-        → Returns the current list of GuestPermission rows for the guest.
-
-    PUT  /admin/users/<pk>/guest-permissions/
-        → Replaces ALL permissions for this guest with the submitted list.
-        Payload: { "permissions": [ {"module": "dashboard"}, ... ] }
-
-    Only accessible by admins. The target user must have role='guest'.
-    """
     permission_classes = [IsAuthenticated, IsAdmin]
 
     def _get_guest_or_404(self, pk):
         try:
-            user = CustomUser.objects.get(pk=pk, role=UserRole.GUEST)
+            return CustomUser.objects.get(pk=pk, role=UserRole.GUEST)
         except CustomUser.DoesNotExist:
             return None
-        return user
 
     def get(self, request, pk):
         guest = self._get_guest_or_404(pk)
         if guest is None:
-            return Response(
-                {'detail': 'Guest user not found.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            return Response({'detail': 'Guest user not found.'}, status=status.HTTP_404_NOT_FOUND)
         perms = GuestPermission.objects.filter(guest=guest)
         return Response(GuestPermissionSerializer(perms, many=True).data)
 
     def put(self, request, pk):
         guest = self._get_guest_or_404(pk)
         if guest is None:
-            return Response(
-                {'detail': 'Guest user not found.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            return Response({'detail': 'Guest user not found.'}, status=status.HTTP_404_NOT_FOUND)
         serializer = GuestPermissionBulkSerializer(data=request.data)
         if serializer.is_valid():
             updated_perms = serializer.save(guest=guest)
@@ -184,3 +159,49 @@ class GuestPermissionView(APIView):
                 status=status.HTTP_200_OK,
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ─── Users (customer_admin / customer_user) filtered by company ───────────────
+#
+# GET /auth/admin/users-by-company/?company_id=<id>
+#
+# CustomUser.company is a CharField storing the company name string.
+# We resolve the name from company_master.Company and filter users by it.
+# Returns a lightweight list: [ {id, email, first_name, last_name, role}, … ]
+
+class UsersByCompanyView(APIView):
+    permission_classes = [IsAuthenticated, IsAdmin]
+
+    def get(self, request):
+        company_id = request.query_params.get('company_id')
+        if not company_id:
+            return Response(
+                {'detail': 'company_id query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            company = Company.objects.get(pk=int(company_id))
+        except (Company.DoesNotExist, ValueError, TypeError):
+            return Response(
+                {'detail': 'Company not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Match users whose company CharField equals the company's name
+        users = CustomUser.objects.filter(
+            company__iexact=company.company_name,
+            role__in=[UserRole.CUSTOMER_ADMIN, UserRole.CUSTOMER_USER],
+            is_active=True,
+        ).order_by('first_name', 'last_name')
+
+        data = [
+            {
+                'id':         u.id,
+                'email':      u.email,
+                'first_name': u.first_name,
+                'last_name':  u.last_name,
+                'role':       u.role,
+            }
+            for u in users
+        ]
+        return Response(data)

@@ -24,6 +24,15 @@ class Company(models.Model):
 
 
 class Customer(models.Model):
+    # ── NEW: link to the company this customer belongs to ─────────────────────
+    company    = models.ForeignKey(
+        Company,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='customers',
+    )
+    # ─────────────────────────────────────────────────────────────────────────
     name       = models.CharField(max_length=200)
     industry   = models.CharField(max_length=100, blank=True)
     address    = models.TextField(blank=True)
