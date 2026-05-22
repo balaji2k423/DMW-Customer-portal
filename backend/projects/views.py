@@ -107,11 +107,16 @@ class CustomerAdminByCompanyView(generics.ListAPIView):
         except Company.DoesNotExist:
             return User.objects.none()
 
-        return User.objects.filter(
-            role='customer_admin',
-            is_active=True,
-            company=company.company_name,   # CharField match on CustomUser
-        ).order_by('first_name', 'last_name')
+        return (
+            User.objects
+            .filter(
+                role='customer_admin',
+                is_active=True,
+                company=company.company_name,   # CharField match on CustomUser
+            )
+            .prefetch_related('project_memberships')   # avoids N+1 for project_ids
+            .order_by('first_name', 'last_name')
+        )
 
 
 # ─── User dropdown (for assigning all team members) ───────────────────────────

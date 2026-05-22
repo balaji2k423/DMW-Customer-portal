@@ -19,9 +19,9 @@ class Ticket(models.Model):
         CLOSED      = 'closed',      'Closed'
 
     class Category(models.TextChoices):
-        TECHNICAL     = 'technical',     'Technical'
-        COMMERCIAL    = 'commercial',    'Commercial'
-        INSTALLATION  = 'installation',  'Installation'
+        HARDWARE      = 'hardware',     'Hardware'
+        SOFTWARE      = 'software',     'Software'
+        NETWORK       = 'network',      'Network'
         TRAINING      = 'training',      'Training'
         OTHER         = 'other',         'Other'
 
@@ -48,7 +48,7 @@ class Ticket(models.Model):
 
     subject         = models.CharField(max_length=255)
     description     = models.TextField()
-    category        = models.CharField(max_length=20, choices=Category.choices, default=Category.TECHNICAL)
+    category        = models.CharField(max_length=20, choices=Category.choices, default=Category.HARDWARE)
     priority        = models.CharField(max_length=20, choices=Priority.choices, default=Priority.MEDIUM)
     status          = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN)
 

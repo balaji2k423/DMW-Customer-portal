@@ -75,45 +75,37 @@ class TicketCustomerListView(APIView):
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get(self, request):
-        qs = get_ticket_queryset(request.user)
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
 
-        # Collect distinct project IDs from visible tickets
-        project_ids = qs.values_list('project_id', flat=True).distinct()
+        user           = request.user
+        CUSTOMER_ROLES = ('customer_admin', 'customer_user')
 
-        # Pull projects and extract their company / customer
-        projects = Project.objects.filter(id__in=project_ids).select_related('company')
+        # Mirror the milestones CustomerListView exactly:
+        # use User.company (plain string field) as both id and name.
+        # This keeps id/name consistent with the customer-admins endpoint
+        # (which stores company as a plain string) so the frontend comparison
+        # ca.company === activeCustomerId works correctly.
+        if user.role in ('admin', 'project_manager'):
+            company_names = (
+                User.objects
+                .filter(role__in=CUSTOMER_ROLES, is_active=True)
+                .exclude(company='')
+                .values_list('company', flat=True)
+                .distinct()
+                .order_by('company')
+            )
+        elif user.role in CUSTOMER_ROLES:
+            company_name  = (user.company or '').strip()
+            company_names = [company_name] if company_name else []
+        else:
+            return Response([])
 
-        seen   = {}   # id → name, deduplication
-        result = []
-
-        for project in projects:
-            try:
-                company = getattr(project, 'company', None)
-                if not company:
-                    continue
-
-                cid = company.id
-
-                if cid in seen:
-                    continue
-
-                # Resolve display name — mirrors _safe_customer_name in milestones
-                name = getattr(company, 'full_name', None)
-                if not name:
-                    get_full = getattr(company, 'get_full_name', None)
-                    if callable(get_full):
-                        name = get_full()
-                if not name or not name.strip():
-                    name = getattr(company, 'email', None) or str(company)
-
-                seen[cid] = name
-                result.append({'id': cid, 'name': name})
-
-            except Exception:
-                continue
-
-        # Stable alphabetical sort
-        result.sort(key=lambda x: x['name'].lower())
+        result = [
+            {'id': name, 'name': name}
+            for name in company_names
+            if name and name.strip()
+        ]
         return Response(result)
 
 

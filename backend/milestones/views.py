@@ -138,19 +138,40 @@ class CustomerAdminListView(APIView):
         if user.role not in ('admin', 'project_manager'):
             return Response([])
 
-        admins = (
-            User.objects
-            .filter(role='customer_admin', is_active=True)
+        from projects.models import ProjectMember
+
+        admin_qs = User.objects.filter(role='customer_admin', is_active=True)
+
+        # BUG FIX: filter by company when the frontend passes ?company=<name>
+        # This ensures the Admins dropdown only shows admins for the selected company.
+        company_filter = request.query_params.get('company')
+        if company_filter:
+            admin_qs = admin_qs.filter(company=company_filter)
+
+        admins = list(
+            admin_qs
             .order_by('first_name', 'last_name')
             .values('id', 'first_name', 'last_name', 'email', 'company')
         )
 
+        # Build a map of user_id → [project_id, ...] in one query
+        admin_ids = [u['id'] for u in admins]
+        memberships = (
+            ProjectMember.objects
+            .filter(user_id__in=admin_ids)
+            .values_list('user_id', 'project_id')
+        )
+        pid_map: dict = {}
+        for uid, pid in memberships:
+            pid_map.setdefault(uid, []).append(pid)
+
         result = [
             {
-                'id':      u['id'],
-                'name':    f"{u['first_name']} {u['last_name']}".strip() or u['email'],
-                'email':   u['email'],
-                'company': u['company'],
+                'id':          u['id'],
+                'name':        f"{u['first_name']} {u['last_name']}".strip() or u['email'],
+                'email':       u['email'],
+                'company':     u['company'],
+                'project_ids': pid_map.get(u['id'], []),
             }
             for u in admins
         ]

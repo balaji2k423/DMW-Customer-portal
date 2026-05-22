@@ -111,6 +111,62 @@ class AdminUserDetailView(generics.RetrieveUpdateDestroyAPIView):
             return AdminUpdateUserSerializer
         return UserSerializer
 
+    def destroy(self, request, *args, **kwargs):
+        user = self.get_object()
+
+        # Prevent admins from deleting themselves
+        if user.pk == request.user.pk:
+            return Response(
+                {'detail': 'You cannot delete your own account.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from django.db import transaction
+
+        with transaction.atomic():
+            # ── groups app ────────────────────────────────────────────────────
+            # GroupMember rows referencing this user (non-CASCADE FK: user_id)
+            try:
+                from groups.models import GroupMember
+                GroupMember.objects.filter(user=user).delete()
+            except ImportError:
+                pass
+
+            # ── projects app ──────────────────────────────────────────────────
+            # ProjectMember rows (non-CASCADE FK: user_id)
+            try:
+                from projects.models import ProjectMember
+                ProjectMember.objects.filter(user=user).delete()
+            except ImportError:
+                pass
+
+            # ── milestones app ────────────────────────────────────────────────
+            # SignOff.signed_by is SET_NULL in the model — null it out explicitly
+            # to avoid any deferred-constraint timing issues.
+            try:
+                from milestones.models import SignOff
+                SignOff.objects.filter(signed_by=user).update(signed_by=None)
+            except ImportError:
+                pass
+
+            # Milestone.owner is also SET_NULL — same treatment.
+            try:
+                from milestones.models import Milestone
+                Milestone.objects.filter(owner=user).update(owner=None)
+            except ImportError:
+                pass
+
+            # ── extend here as needed ─────────────────────────────────────────
+            # Any other table with a non-CASCADE / non-SET_NULL FK to CustomUser
+            # must be handled here before user.delete() or you'll get another
+            # IntegrityError. Pattern:
+            #   SomeModel.objects.filter(user=user).delete()   # for owned rows
+            #   SomeModel.objects.filter(user=user).update(user=None)  # for nullable FKs
+
+            user.delete()
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 class AdminCreateUserView(generics.CreateAPIView):
     queryset = CustomUser.objects.all()
