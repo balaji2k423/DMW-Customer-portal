@@ -1,27 +1,58 @@
-from rest_framework.permissions import BasePermission
+# milestones/permissions.py
+
+from rest_framework.permissions import BasePermission, SAFE_METHODS
 
 
 class CanSignOff(BasePermission):
-    """Only customer admins can sign off milestones."""
-    message = 'Only customer admins can sign off milestones.'
+    """
+    FIX: Previously allowed customer_admin to sign off / approve milestones.
+    Rule: only admin and project_manager may approve (sign off) a milestone.
+    customer_admin must NOT be able to approve milestones.
+    """
+    message = 'Only project managers and admins can approve milestones.'
 
     def has_permission(self, request, view):
-        return request.user.role in ('customer_admin',)
+        return (
+            request.user
+            and request.user.is_authenticated
+            and request.user.role in ('project_manager', 'admin')
+        )
 
 
-class IsProjectManagerOrReadOnly(BasePermission):
-    """Project managers can write. Customers get read-only."""
+class IsProjectManagerOrAdmin(BasePermission):
+    """
+    project_manager and admin can write (create / edit / delete milestones).
+    All authenticated users get read-only (GET / HEAD / OPTIONS).
+
+    Rule: milestones can be created by both admin and project_manager.
+    Previously IsProjectManagerOrReadOnly excluded admin from writes,
+    and IsAdminOrReadOnly excluded project_manager from writes — both wrong.
+    This class correctly allows both roles to write.
+    """
+    message = 'Only project managers and admins can create or modify milestones.'
 
     def has_permission(self, request, view):
-        if request.method in ('GET', 'HEAD', 'OPTIONS'):
-            return True
-        return request.user.role == 'project_manager'
+        if request.method in SAFE_METHODS:
+            return request.user and request.user.is_authenticated
+        return (
+            request.user
+            and request.user.is_authenticated
+            and request.user.role in ('project_manager', 'admin')
+        )
+
 
 class IsAdminOrReadOnly(BasePermission):
-    """Only admins can create, update, or delete. Everyone else is read-only."""
-    message = 'Only admins can create or modify milestones.'
+    """
+    Kept for any view that should be admin-write-only.
+    Not used on milestone create/edit — use IsProjectManagerOrAdmin there.
+    """
+    message = 'Only admins can create or modify this resource.'
 
     def has_permission(self, request, view):
-        if request.method in ('GET', 'HEAD', 'OPTIONS'):
-            return True
-        return request.user.is_authenticated and request.user.role == 'admin'
+        if request.method in SAFE_METHODS:
+            return request.user and request.user.is_authenticated
+        return (
+            request.user
+            and request.user.is_authenticated
+            and request.user.role == 'admin'
+        )

@@ -1,6 +1,4 @@
-"""
-projects/views.py
-"""
+# projects/views.py
 
 from rest_framework import generics, status, filters
 from rest_framework.views import APIView
@@ -21,7 +19,7 @@ from .serializers import (
     ProjectMemberSerializer,
     DashboardSerializer,
 )
-from .permissions import IsProjectMember, IsProjectManagerOrReadOnly
+from .permissions import IsProjectMember, IsProjectManagerOrReadOnly, IsAdminOrReadOnly
 
 from company_master.models import Company
 
@@ -33,8 +31,7 @@ User = get_user_model()
 def get_customer_projects(user):
     """
     Returns projects visible to a non-admin user.
-    Membership is tracked entirely through ProjectMember —
-    the old Project.customer FK no longer exists.
+    Membership is tracked entirely through ProjectMember.
     """
     member_project_ids = ProjectMember.objects.filter(
         user=user
@@ -57,7 +54,9 @@ class DashboardView(APIView):
 
     def get(self, request):
         user = request.user
-        if user.role in ('project_manager', 'admin'):
+        # FIX: only admin gets the unrestricted project list on the dashboard.
+        # project_manager was incorrectly given admin-level access here.
+        if user.role == 'admin':
             projects = (
                 Project.objects.all()
                 .select_related('company')
@@ -92,8 +91,6 @@ class CustomerAdminByCompanyView(generics.ListAPIView):
     """
     GET /projects/companies/<company_id>/customer-admins/
     Shape: [{ id, email, full_name }]
-
-    CustomUser.company is a CharField storing the company name (not a FK).
     """
     serializer_class   = CustomerAdminDropdownSerializer
     permission_classes = [IsAuthenticated]
@@ -112,9 +109,10 @@ class CustomerAdminByCompanyView(generics.ListAPIView):
             .filter(
                 role='customer_admin',
                 is_active=True,
-                company=company.company_name,   # CharField match on CustomUser
+                company=company.company_name,
             )
-            .prefetch_related('project_memberships')   # avoids N+1 for project_ids
+            # Prefetch memberships so get_project_ids() hits the cache, not the DB
+            .prefetch_related('project_memberships')
             .order_by('first_name', 'last_name')
         )
 
@@ -137,6 +135,7 @@ class UserDropdownView(generics.ListAPIView):
 class CustomerListCreateView(generics.ListCreateAPIView):
     queryset           = Customer.objects.all()
     serializer_class   = CustomerSerializer
+    # project_manager may still manage Customer records (not Project records).
     permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
     throttle_classes   = [BurstRateThrottle, SustainedRateThrottle, IPRateThrottle]
     filter_backends    = [filters.SearchFilter, filters.OrderingFilter]
@@ -154,7 +153,9 @@ class CustomerDetailView(generics.RetrieveUpdateDestroyAPIView):
 # ─── Projects ─────────────────────────────────────────────────────────────────
 
 class ProjectListCreateView(generics.ListCreateAPIView):
-    permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
+    # FIX: IsAdminOrReadOnly — only admin may POST (create) a project.
+    # Previously IsProjectManagerOrReadOnly incorrectly allowed project_manager to create.
+    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
     throttle_classes   = [BurstRateThrottle, SustainedRateThrottle, IPRateThrottle]
     filter_backends    = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields   = ['status', 'company']
@@ -163,7 +164,9 @@ class ProjectListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role in ('project_manager', 'admin'):
+        # FIX: only admin gets the unrestricted queryset.
+        # project_manager was incorrectly treated as elevated here.
+        if user.role == 'admin':
             return (
                 Project.objects.all()
                 .select_related('company')
@@ -176,18 +179,16 @@ class ProjectListCreateView(generics.ListCreateAPIView):
 
 
 class ProjectDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """
-    BUG FIX: previously had a copy-paste of CustomerAdminByCompanyView.get_queryset()
-    which returned a User queryset instead of a Project queryset, causing
-    ValueError("Must be Company instance") across all downstream modules.
-    """
-    permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
+    # FIX: IsAdminOrReadOnly — only admin may PUT/PATCH/DELETE a project.
+    # Previously IsProjectManagerOrReadOnly incorrectly allowed project_manager to edit/delete.
+    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
     serializer_class   = ProjectDetailSerializer
 
     def get_queryset(self):
         user = self.request.user
-        if user.role in ('project_manager', 'admin'):
+        # FIX: only admin gets the unrestricted queryset.
+        if user.role == 'admin':
             return (
                 Project.objects.all()
                 .select_related('company')
@@ -200,7 +201,9 @@ class ProjectDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 class ProjectMemberListView(generics.ListCreateAPIView):
     serializer_class   = ProjectMemberSerializer
-    permission_classes = [IsAuthenticated]
+    # FIX: was [IsAuthenticated] alone — any logged-in user could POST (add members).
+    # Now only admin can add project members.
+    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get_queryset(self):
@@ -215,7 +218,9 @@ class ProjectMemberListView(generics.ListCreateAPIView):
 
 class ProjectMemberDetailView(generics.RetrieveDestroyAPIView):
     serializer_class   = ProjectMemberSerializer
-    permission_classes = [IsAuthenticated, IsProjectManagerOrReadOnly]
+    # FIX: was IsProjectManagerOrReadOnly — project_manager could delete members.
+    # Now only admin can remove a project member.
+    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     def get_queryset(self):

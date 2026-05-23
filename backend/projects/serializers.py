@@ -33,15 +33,27 @@ class CompanyDropdownSerializer(serializers.ModelSerializer):
 # The frontend sends these user ids as member_assignments with role=customer_admin.
 
 class CustomerAdminDropdownSerializer(serializers.ModelSerializer):
-    full_name = serializers.SerializerMethodField()
+    full_name   = serializers.SerializerMethodField()
+    project_ids = serializers.SerializerMethodField()
 
     def get_full_name(self, obj):
         name = f"{obj.first_name or ''} {obj.last_name or ''}".strip()
         return name or obj.email
 
+    def get_project_ids(self, obj):
+        """
+        Return the list of project IDs this customer_admin is a member of.
+        The frontend uses this list to populate the Project dropdown (Step 3).
+        """
+        from .models import ProjectMember  # avoid circular import at module level
+        return list(
+            ProjectMember.objects.filter(user=obj)
+            .values_list('project_id', flat=True)
+        )
+
     class Meta:
         model  = User
-        fields = ['id', 'email', 'full_name']
+        fields = ['id', 'email', 'full_name', 'project_ids']
 
 
 # ─── User dropdown (for assigning all team members) ───────────────────────────
@@ -84,19 +96,25 @@ class MemberInputSerializer(serializers.Serializer):
 class ProjectListSerializer(serializers.ModelSerializer):
     company_name    = serializers.SerializerMethodField()
     member_count    = serializers.SerializerMethodField()
-    # Convenience: list of customer_admin names shown on the card
     customer_admins = serializers.SerializerMethodField()
+    # Expose the company PK as customer_id so the frontend filter cascade can
+    # match projects back to the selected company without an extra round-trip.
+    customer_id     = serializers.SerializerMethodField()
 
     class Meta:
         model  = Project
         fields = [
-            'id', 'name', 'company', 'company_name', 'customer_admins',
-            'status', 'progress', 'robot_model', 'start_date',
-            'expected_end', 'member_count', 'created_at',
+            'id', 'name', 'company', 'company_name', 'customer_id',
+            'customer_admins', 'status', 'progress', 'robot_model',
+            'start_date', 'expected_end', 'member_count', 'created_at',
         ]
 
     def get_company_name(self, obj):
         return obj.company.company_name if obj.company else None
+
+    def get_customer_id(self, obj):
+        """Return the company PK (aliased as customer_id for frontend compatibility)."""
+        return obj.company_id  # direct FK id — no extra query
 
     def get_member_count(self, obj):
         return obj.members.count()

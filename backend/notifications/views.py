@@ -1,3 +1,5 @@
+# notifications/views.py
+
 from rest_framework import generics, status, filters
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -12,10 +14,7 @@ from .serializers import NotificationSerializer, ActivityLogSerializer
 
 
 class NotificationListView(generics.ListAPIView):
-    """
-    Returns paginated notifications for the logged-in user.
-    Supports filtering by is_read and type.
-    """
+    """Returns paginated notifications for the logged-in user."""
     serializer_class   = NotificationSerializer
     permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, SustainedRateThrottle, IPRateThrottle]
@@ -30,10 +29,7 @@ class NotificationListView(generics.ListAPIView):
 
 
 class NotificationUnreadCountView(APIView):
-    """
-    Returns unread notification count for the bell icon.
-    Called frequently — very lightweight.
-    """
+    """Returns unread notification count for the bell icon."""
     permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
@@ -56,8 +52,7 @@ class NotificationMarkReadView(APIView):
     def post(self, request):
         mark_all = request.data.get('all', False)
         ids      = request.data.get('ids', [])
-
-        now = timezone.now()
+        now      = timezone.now()
 
         if mark_all:
             updated = Notification.objects.filter(
@@ -87,10 +82,7 @@ class NotificationMarkSingleReadView(APIView):
 
     def patch(self, request, pk):
         try:
-            notification = Notification.objects.get(
-                pk=pk,
-                recipient=request.user
-            )
+            notification = Notification.objects.get(pk=pk, recipient=request.user)
         except Notification.DoesNotExist:
             return Response(
                 {'error': 'Notification not found.'},
@@ -107,10 +99,7 @@ class NotificationDeleteView(APIView):
 
     def delete(self, request, pk):
         try:
-            notification = Notification.objects.get(
-                pk=pk,
-                recipient=request.user
-            )
+            notification = Notification.objects.get(pk=pk, recipient=request.user)
         except Notification.DoesNotExist:
             return Response(
                 {'error': 'Notification not found.'},
@@ -123,8 +112,11 @@ class NotificationDeleteView(APIView):
 class ActivityLogListView(generics.ListAPIView):
     """
     Global activity feed.
-    Customers see only their project activity.
-    Project managers see all activity.
+
+    FIX: previously project_manager saw ALL activity (same as admin).
+    Rule: admin sees all; everyone else sees only their project activity.
+    project_manager is a member of specific projects via ProjectMember,
+    so they should see only those projects' logs, not the entire system log.
     """
     serializer_class   = ActivityLogSerializer
     permission_classes = [IsAuthenticated]
@@ -135,7 +127,9 @@ class ActivityLogListView(generics.ListAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role == 'project_manager':
+        # FIX: only admin sees the full unrestricted activity log.
+        # project_manager was incorrectly given admin-level access here.
+        if user.role == 'admin':
             return ActivityLog.objects.all().select_related('actor', 'project')
 
         project_ids = ProjectMember.objects.filter(
@@ -160,13 +154,20 @@ class ProjectActivityLogView(generics.ListAPIView):
         project_pk = self.kwargs['project_pk']
         user       = self.request.user
 
-        if user.role != 'project_manager':
-            is_member = ProjectMember.objects.filter(
-                user=user,
+        # FIX: previously only project_manager was given unrestricted access
+        # to all project logs; admin was incorrectly excluded and subject to
+        # the membership check. Admin should always see all project logs.
+        if user.role == 'admin':
+            return ActivityLog.objects.filter(
                 project_id=project_pk
-            ).exists()
-            if not is_member:
-                return ActivityLog.objects.none()
+            ).select_related('actor', 'project')
+
+        is_member = ProjectMember.objects.filter(
+            user=user,
+            project_id=project_pk
+        ).exists()
+        if not is_member:
+            return ActivityLog.objects.none()
 
         return ActivityLog.objects.filter(
             project_id=project_pk

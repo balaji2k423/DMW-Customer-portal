@@ -1,6 +1,4 @@
-"""
-documents/views.py
-"""
+# documents/views.py
 
 import os
 from django.http import FileResponse, Http404
@@ -28,16 +26,15 @@ MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
 def get_user_accessible_project_ids(user):
     """
     Returns:
-      - None → admin (unrestricted, sees all projects)
-      - list → project IDs the user can see via ProjectMember membership
-
-    BUG FIX: removed Q(customer=user) — Project.customer FK no longer exists.
-    Membership for all non-admin roles is tracked solely through ProjectMember.
+      - None  → admin (unrestricted, sees all projects)
+      - list  → project IDs the user can see via ProjectMember membership
 
     Scoping rules:
       admin           → None (all projects)
-      project_manager → projects they are explicitly assigned to as a ProjectMember
+      project_manager → projects they are explicitly a ProjectMember of
       customer_*      → projects they are a ProjectMember of
+      guest           → projects they are a ProjectMember of
+                        (admin grants guest access by adding them as a ProjectMember)
     """
     if user.role == 'admin':
         return None  # unrestricted
@@ -45,6 +42,44 @@ def get_user_accessible_project_ids(user):
     return list(
         ProjectMember.objects.filter(user=user).values_list('project_id', flat=True)
     )
+
+
+def _can_upload(user):
+    """
+    Upload rules:
+      - admin           : always yes
+      - project_manager : yes (own projects enforced separately in create())
+      - customer_admin  : yes
+      - customer_user   : yes
+      - guest           : yes ONLY if admin has granted them document-page access
+                          (tracked via GuestPermission with module='documents')
+    """
+    if user.role in ('admin', 'project_manager', 'customer_admin', 'customer_user'):
+        return True
+
+    if user.role == 'guest':
+        # FIX: guests may upload only when admin has explicitly granted document access.
+        # Previously guest upload was blocked entirely.
+        try:
+            from accounts.models import GuestPermission
+            return GuestPermission.objects.filter(
+                guest=user,
+                module='documents',
+            ).exists()
+        except Exception:
+            return False
+
+    return False
+
+
+def _can_edit_or_delete(user):
+    """
+    Edit / delete rules: only admin and project_manager.
+    FIX: previously the inline role check used ('admin', 'project_manager')
+    correctly, but it was duplicated across three methods without a shared
+    helper. Centralised here so future role changes only need one edit.
+    """
+    return user.role in ('admin', 'project_manager')
 
 
 def _doc_queryset(user, customer_admin_id=None):
@@ -57,7 +92,6 @@ def _doc_queryset(user, customer_admin_id=None):
     else:
         qs = qs.filter(project_id__in=project_ids)
 
-    # Optional: further scope to projects where a specific customer_admin is a member
     if customer_admin_id:
         ca_project_ids = list(
             ProjectMember.objects.filter(user_id=customer_admin_id)
@@ -96,9 +130,11 @@ class DocumentListCreateView(generics.ListCreateAPIView):
         return DocumentUploadSerializer if self.request.method == 'POST' else DocumentListSerializer
 
     def create(self, request, *args, **kwargs):
-        if request.user.role not in ('admin', 'project_manager'):
+        # FIX: replaced hardcoded ('admin', 'project_manager') check with _can_upload()
+        # so that customer_admin, customer_user, and permitted guests can also upload.
+        if not _can_upload(request.user):
             return Response(
-                {'error': 'Only admins and project managers can upload documents.'},
+                {'error': 'You do not have permission to upload documents.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
@@ -106,7 +142,7 @@ class DocumentListCreateView(generics.ListCreateAPIView):
         if size_err:
             return size_err
 
-        # Project managers can only upload to their own assigned projects
+        # project_manager can only upload to their own assigned projects.
         if request.user.role == 'project_manager':
             project_id = request.data.get('project')
             if project_id:
@@ -135,7 +171,9 @@ class DocumentDetailView(generics.RetrieveUpdateDestroyAPIView):
         return DocumentUploadSerializer if self.request.method in ('PUT', 'PATCH') else DocumentDetailSerializer
 
     def update(self, request, *args, **kwargs):
-        if request.user.role not in ('admin', 'project_manager'):
+        # FIX: edit restricted to admin and project_manager only (rule unchanged,
+        # but now uses the shared _can_edit_or_delete helper for consistency).
+        if not _can_edit_or_delete(request.user):
             return Response(
                 {'error': 'Only admins and project managers can edit documents.'},
                 status=status.HTTP_403_FORBIDDEN,
@@ -146,7 +184,8 @@ class DocumentDetailView(generics.RetrieveUpdateDestroyAPIView):
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        if request.user.role not in ('admin', 'project_manager'):
+        # FIX: delete restricted to admin and project_manager only.
+        if not _can_edit_or_delete(request.user):
             return Response(
                 {'error': 'Only admins and project managers can delete documents.'},
                 status=status.HTTP_403_FORBIDDEN,
@@ -204,7 +243,8 @@ class DocumentVersionUploadView(APIView):
     parser_classes     = [MultiPartParser, FormParser]
 
     def post(self, request, document_pk):
-        if request.user.role not in ('admin', 'project_manager'):
+        # Version upload is an edit operation — admin and project_manager only.
+        if not _can_edit_or_delete(request.user):
             return Response(
                 {'error': 'Only admins and project managers can upload new versions.'},
                 status=status.HTTP_403_FORBIDDEN,

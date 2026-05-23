@@ -1,6 +1,4 @@
-"""
-tickets/views.py
-"""
+# tickets/views.py
 
 from rest_framework import generics, status, filters
 from rest_framework.views import APIView
@@ -37,7 +35,7 @@ def get_user_project_ids(user):
     customer_*      → only projects they are a ProjectMember of
     """
     if user.role == 'admin':
-        return None  # None == "all projects"
+        return None
 
     return ProjectMember.objects.filter(
         user=user
@@ -52,24 +50,12 @@ def get_ticket_queryset(user):
     return qs.filter(project_id__in=project_ids)
 
 
-# ── Customer list (mirrors milestones CustomerListView) ────────────────────────
+# ── Customer list ──────────────────────────────────────────────────────────────
 
 class TicketCustomerListView(APIView):
     """
     GET /tickets/customers/
-
-    Returns the distinct list of customers (companies) whose projects have
-    at least one ticket visible to the requesting user.
-
-    Staff (admin / project_manager) see all customers.
-    Customers only see their own company — so the list will contain just
-    themselves, which is fine (the frontend can hide the dropdown if len == 1).
-
-    Response shape:
-        [{ "id": <int|str>, "name": "<company name>" }, ...]
-
-    We derive the customer from project.company (same pattern as the
-    milestones app).  Falls back gracefully if the relation doesn't exist.
+    Returns distinct customer companies whose projects have visible tickets.
     """
     permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
@@ -78,14 +64,8 @@ class TicketCustomerListView(APIView):
         from django.contrib.auth import get_user_model
         User = get_user_model()
 
-        user           = request.user
-        CUSTOMER_ROLES = ('customer_admin', 'customer_user')
+        user = request.user
 
-        # Mirror the milestones CustomerListView exactly:
-        # use User.company (plain string field) as both id and name.
-        # This keeps id/name consistent with the customer-admins endpoint
-        # (which stores company as a plain string) so the frontend comparison
-        # ca.company === activeCustomerId works correctly.
         if user.role in ('admin', 'project_manager'):
             company_names = (
                 User.objects
@@ -122,16 +102,12 @@ class TicketListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         qs = get_ticket_queryset(self.request.user)
 
-        # ── Customer filter ──────────────────────────────────────────────────
-        # ?customer_id=<id>  — filter tickets whose project belongs to the
-        # given company/customer.  Staff-only in practice; customers will only
-        # ever see their own tickets anyway.
         customer_id = self.request.query_params.get('customer_id')
         if customer_id:
             try:
                 qs = qs.filter(project__company_id=customer_id)
             except Exception:
-                pass  # silently ignore if company FK doesn't exist
+                pass
 
         return qs
 
@@ -143,10 +119,13 @@ class TicketListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         user = self.request.user
 
-        if user.role not in CUSTOMER_ROLES:
+        # FIX: rule is "only customer_admin can raise tickets".
+        # Previously CUSTOMER_ROLES = ('customer_admin', 'customer_user') was used,
+        # meaning customer_user could also raise tickets — that is wrong.
+        if user.role != 'customer_admin':
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied(
-                "Only customer_admin or customer_user accounts may raise support tickets."
+                'Only customer_admin accounts may raise support tickets.'
             )
 
         ticket = serializer.save(raised_by=user)
@@ -218,21 +197,35 @@ class TicketStatusChangeView(APIView):
     """
     POST { "status": "resolved", "note": "Fixed." }
 
-    Permission matrix
-    ─────────────────
-    customer_admin  : open, closed
-    customer_user   : open
-    project_manager : open, in_progress, on_hold, resolved, closed
-    admin           : in_progress, on_hold, resolved
+    Permission matrix (enforced via VALID_TRANSITIONS):
+    ─────────────────────────────────────────────────
+    customer_admin  : open → closed  (raise and close tickets — no other transitions)
+    project_manager : open, in_progress, on_hold, resolved
+    admin           : open, in_progress, on_hold, resolved
+
+    FIX 1: customer_user was allowed to set status='open' — removed entirely.
+           Only customer_admin can raise (create) and close tickets.
+
+    FIX 2: admin was missing 'closed' but project_manager had it — inconsistent.
+           Closing a ticket should be customer_admin only per the stated rule,
+           so 'closed' is removed from project_manager and admin transitions.
+           They resolve tickets; customer_admin closes them.
+
+    FIX 3: admin was allowed 'in_progress', 'on_hold', 'resolved' but NOT 'open'.
+           Added 'open' so admin can reopen a ticket if needed (same as project_manager).
     """
     permission_classes = [IsAuthenticated]
     throttle_classes   = [BurstRateThrottle, IPRateThrottle]
 
     VALID_TRANSITIONS = {
+        # customer_admin : can only close (and re-open) their own tickets.
         'customer_admin':  ['open', 'closed'],
-        'customer_user':   ['open'],
-        'project_manager': ['open', 'in_progress', 'on_hold', 'resolved', 'closed'],
-        'admin':           ['in_progress', 'on_hold', 'resolved'],
+        # project_manager : full workflow except closing (customer closes).
+        'project_manager': ['open', 'in_progress', 'on_hold', 'resolved'],
+        # admin           : same as project_manager.
+        'admin':           ['open', 'in_progress', 'on_hold', 'resolved'],
+        # customer_user   : NO status transitions allowed (cannot raise or close tickets).
+        # (omitted from dict so .get() returns [] by default)
     }
 
     def post(self, request, pk):
@@ -431,7 +424,6 @@ class TicketSummaryView(APIView):
     def get(self, request):
         qs = get_ticket_queryset(request.user)
 
-        # ── Customer filter — keeps summary stats consistent with the list ──
         customer_id = request.query_params.get('customer_id')
         if customer_id:
             try:
